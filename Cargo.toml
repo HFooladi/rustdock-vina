@@ -1,0 +1,44 @@
+[package]
+name = "rustdock-vina"
+version = "0.1.0"
+edition = "2021"
+authors = ["Hosein Fooladi <fooladi.hosein@gmail.com>"]
+description = "A Rust implementation of AutoDock Vina molecular docking algorithm"
+license = "Apache-2.0"
+repository = "https://github.com/HFooladi/rustdock-vina"
+keywords = ["molecular-docking", "chemistry", "bioinformatics", "vina", "autodock"]
+categories = ["science", "simulation"]
+
+[dependencies]
+nalgebra = "0.32"  # Linear algebra
+rand = "0.8"       # Random number generation
+rayon = "1.7"      # Parallel computing
+serde = { version = "1.0", features = ["derive"] }  # Serialization
+serde_json = "1.0" # JSON support
+clap = { version = "4.3", features = ["derive"] }   # CLI argument parsing
+log = "0.4"        # Logging
+env_logger = "0.10" # Logging implementation
+thiserror = "1.0"  # Error handling
+
+[dev-dependencies]
+criterion = "0.5"  # Benchmarking
+tempfile = "3.8"   # Temporary files for tests
+assert_approx_eq = "1.1"  # Float comparisons in tests
+
+[lib]
+name = "rustdock_vina"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vina"
+path = "src/main.rs"
+
+[[bench]]
+name = "docking_benchmark"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+opt-level = 3
