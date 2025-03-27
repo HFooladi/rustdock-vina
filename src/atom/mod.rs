@@ -210,3 +210,175 @@ impl fmt::Display for Atom {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nalgebra::Vector3;
+
+    #[test]
+    fn test_atom_type_radius() {
+        assert_eq!(AtomType::Carbon.radius(), 2.0);
+        assert_eq!(AtomType::Nitrogen.radius(), 1.75);
+        assert_eq!(AtomType::Oxygen.radius(), 1.6);
+        assert_eq!(AtomType::Hydrogen.radius(), 1.0);
+        assert_eq!(AtomType::ZincPseudo.radius(), 0.25);
+    }
+
+    #[test]
+    fn test_atom_type_from_pdbqt_string() {
+        assert_eq!(AtomType::from_pdbqt_string("C"), AtomType::Carbon);
+        assert_eq!(AtomType::from_pdbqt_string("NA"), AtomType::NitrogenH);
+        assert_eq!(AtomType::from_pdbqt_string("OA"), AtomType::OxygenH);
+        assert_eq!(AtomType::from_pdbqt_string("HD"), AtomType::HydrogenD);
+        assert_eq!(AtomType::from_pdbqt_string("TZ"), AtomType::ZincPseudo);
+        assert_eq!(AtomType::from_pdbqt_string("UNKNOWN"), AtomType::Unknown);
+    }
+
+    #[test]
+    fn test_atom_type_to_pdbqt_string() {
+        assert_eq!(AtomType::Carbon.to_pdbqt_string(), "C");
+        assert_eq!(AtomType::NitrogenH.to_pdbqt_string(), "NA");
+        assert_eq!(AtomType::OxygenH.to_pdbqt_string(), "OA");
+        assert_eq!(AtomType::HydrogenD.to_pdbqt_string(), "HD");
+        assert_eq!(AtomType::ZincPseudo.to_pdbqt_string(), "TZ");
+        assert_eq!(AtomType::Unknown.to_pdbqt_string(), "X");
+    }
+
+    #[test]
+    fn test_atom_creation() {
+        let atom = Atom::new(
+            AtomType::Carbon,
+            Vector3::new(1.0, 2.0, 3.0),
+            "CA".to_string(),
+            1,
+            "ALA".to_string(),
+            1,
+            'A',
+            0.0,
+        );
+
+        assert_eq!(atom.atom_type, AtomType::Carbon);
+        assert_eq!(atom.coordinates, Vector3::new(1.0, 2.0, 3.0));
+        assert_eq!(atom.name, "CA");
+        assert_eq!(atom.serial, 1);
+        assert_eq!(atom.residue_name, "ALA");
+        assert_eq!(atom.residue_num, 1);
+        assert_eq!(atom.chain_id, 'A');
+        assert_eq!(atom.charge, 0.0);
+        assert!(!atom.is_flexible);
+    }
+
+    #[test]
+    fn test_atom_distance() {
+        let atom1 = Atom::new(
+            AtomType::Carbon,
+            Vector3::new(0.0, 0.0, 0.0),
+            "CA".to_string(),
+            1,
+            "ALA".to_string(),
+            1,
+            'A',
+            0.0,
+        );
+
+        let atom2 = Atom::new(
+            AtomType::Carbon,
+            Vector3::new(1.0, 1.0, 1.0),
+            "CA".to_string(),
+            2,
+            "ALA".to_string(),
+            1,
+            'A',
+            0.0,
+        );
+
+        // Distance should be sqrt(3) ≈ 1.732
+        assert!((atom1.distance(&atom2) - 1.732).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_h_bond_donor() {
+        let h_donor = Atom::new(
+            AtomType::HydrogenD,
+            Vector3::new(0.0, 0.0, 0.0),
+            "H".to_string(),
+            1,
+            "ALA".to_string(),
+            1,
+            'A',
+            0.0,
+        );
+
+        let non_donor = Atom::new(
+            AtomType::Carbon,
+            Vector3::new(0.0, 0.0, 0.0),
+            "C".to_string(),
+            2,
+            "ALA".to_string(),
+            1,
+            'A',
+            0.0,
+        );
+
+        assert!(h_donor.is_h_bond_donor());
+        assert!(!non_donor.is_h_bond_donor());
+    }
+
+    #[test]
+    fn test_h_bond_acceptor() {
+        let o_acceptor = Atom::new(
+            AtomType::OxygenH,
+            Vector3::new(0.0, 0.0, 0.0),
+            "O".to_string(),
+            1,
+            "ALA".to_string(),
+            1,
+            'A',
+            0.0,
+        );
+
+        let n_acceptor = Atom::new(
+            AtomType::NitrogenH,
+            Vector3::new(0.0, 0.0, 0.0),
+            "N".to_string(),
+            2,
+            "ALA".to_string(),
+            1,
+            'A',
+            0.0,
+        );
+
+        let non_acceptor = Atom::new(
+            AtomType::Carbon,
+            Vector3::new(0.0, 0.0, 0.0),
+            "C".to_string(),
+            3,
+            "ALA".to_string(),
+            1,
+            'A',
+            0.0,
+        );
+
+        assert!(o_acceptor.is_h_bond_acceptor());
+        assert!(n_acceptor.is_h_bond_acceptor());
+        assert!(!non_acceptor.is_h_bond_acceptor());
+    }
+
+    #[test]
+    fn test_atom_display() {
+        let atom = Atom::new(
+            AtomType::Carbon,
+            Vector3::new(1.0, 2.0, 3.0),
+            "CA".to_string(),
+            1,
+            "ALA".to_string(),
+            1,
+            'A',
+            0.5,
+        );
+
+        let expected = "C(1, 2, 3) [0.5]";
+        assert_eq!(format!("{}", atom), expected);
+    }
+}

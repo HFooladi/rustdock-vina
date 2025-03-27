@@ -13,7 +13,7 @@ documentation = "https://docs.rs/rustdock-vina"
 homepage = "https://github.com/HFooladi/rustdock-vina"
 
 [dependencies]
-nalgebra = "0.32"  # Linear algebra
+nalgebra = { version = "0.32", features = ["serde-serialize"] }  # Linear algebra
 rand = "0.8"       # Random number generation
 rayon = "1.7"      # Parallel computing
 serde = { version = "1.0", features = ["derive"] }  # Serialization
@@ -37,7 +37,19 @@ name = "vina"
 path = "src/main.rs"
 
 [[bench]]
-name = "docking_benchmark"
+name = "docking"
+harness = false
+
+[[bench]]
+name = "grid"
+harness = false
+
+[[bench]]
+name = "optimization"
+harness = false
+
+[[bench]]
+name = "scoring"
 harness = false
 
 [profile.release]

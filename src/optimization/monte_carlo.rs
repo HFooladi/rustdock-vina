@@ -1,6 +1,6 @@
 //! Monte Carlo search algorithm for molecular docking
 
-use nalgebra::{Vector3, UnitQuaternion};
+use nalgebra::{Vector3, UnitQuaternion, Unit};
 use rand::prelude::*;
 use std::f64::consts::PI;
 
@@ -92,9 +92,15 @@ impl MonteCarlo {
             rng.gen::<f64>() - 0.5,
             rng.gen::<f64>() - 0.5,
             rng.gen::<f64>() - 0.5,
-        ).normalize();
+        );
         
-        UnitQuaternion::from_axis_angle(&axis, angle)
+        if axis.norm() > 0.0 {
+            let unit_axis = Unit::new_normalize(axis);
+            UnitQuaternion::from_axis_angle(&unit_axis, angle)
+        } else {
+            // If axis is zero, return identity quaternion
+            UnitQuaternion::identity()
+        }
     }
     
     /// Apply a translation to the molecule
@@ -151,7 +157,7 @@ impl MonteCarlo {
         let atom2_pos = molecule.atoms[atom2_idx].coordinates;
         
         // Calculate the axis of rotation
-        let axis = (atom2_pos - atom1_pos).normalize();
+        let axis = Unit::new_normalize(atom2_pos - atom1_pos);
         
         // Create rotation quaternion
         let rotation = UnitQuaternion::from_axis_angle(&axis, delta_angle);
@@ -330,23 +336,23 @@ impl Optimizer for MonteCarlo {
     ) -> Result<Vec<DockingResult>, OptimizationError> {
         let mut results = Vec::with_capacity(num_poses);
         
+        // Generate poses
         for _ in 0..num_poses {
-            // For each pose, run an independent optimization
             let result = self.optimize(molecule, forcefield, center, box_size, max_steps)?;
             results.push(result);
         }
         
-        // Sort by energy (lowest first)
-        results.sort_by(|a, b| a.energy.partial_cmp(&b.energy).unwrap_or(std::cmp::Ordering::Equal));
+        // Sort by energy
+        results.sort_by(|a, b| a.energy.partial_cmp(&b.energy).unwrap());
         
-        // Calculate RMSD to the best pose for each result
+        // Calculate RMSD to best pose
         if !results.is_empty() {
-            let best_molecule = &results[0].molecule;
+            let (first, rest) = results.split_at_mut(1);
+            let best_molecule = &first[0].molecule;
             
-            for i in 1..results.len() {
-                // Calculate RMSD
-                let rmsd = calculate_rmsd(&results[i].molecule, best_molecule);
-                results[i].rmsd = Some(rmsd);
+            for result in rest {
+                let rmsd = calculate_rmsd(&result.molecule, best_molecule);
+                result.rmsd = Some(rmsd);
             }
         }
         

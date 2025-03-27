@@ -133,20 +133,10 @@ impl ForceField for AD4ForceField {
             Some(p) => *p,
             None => {
                 // Calculate arithmetic mean of radii and geometric mean of well depths
-                let r1 = type1.radius() * 2.0; // Convert to diameter
-                let r2 = type2.radius() * 2.0;
-                let eps1 = match type1 {
-                    AtomType::Carbon => 0.15,
-                    AtomType::Nitrogen | AtomType::NitrogenH => 0.16,
-                    AtomType::Oxygen | AtomType::OxygenH => 0.2,
-                    _ => 0.1,
-                };
-                let eps2 = match type2 {
-                    AtomType::Carbon => 0.15,
-                    AtomType::Nitrogen | AtomType::NitrogenH => 0.16,
-                    AtomType::Oxygen | AtomType::OxygenH => 0.2,
-                    _ => 0.1,
-                };
+                let r1 = type1.radius();
+                let r2 = type2.radius();
+                let eps1 = self.get_epsilon(atom1)?;
+                let eps2 = self.get_epsilon(atom2)?;
                 
                 ((r1 + r2) / 2.0, (eps1 * eps2).sqrt())
             }

@@ -154,24 +154,18 @@ impl ForceField for VinaForceField {
             return Ok(0.0);
         }
         
-        // Distance cutoffs for hydrophobic interactions
-        let r_max = 4.5;
-        let r_min = 0.5;
+        // Parameters for hydrophobic interaction
+        let optimal_distance = 4.5; // Angstroms
+        let cutoff = 8.0; // Angstroms
         
-        if distance > r_max || distance < r_min {
+        if distance > cutoff {
             return Ok(0.0);
         }
         
-        // Linear interpolation between cutoffs
-        let hydrophobic_factor = if distance <= r_min {
-            1.0
-        } else if distance >= r_max {
-            0.0
-        } else {
-            (r_max - distance) / (r_max - r_min)
-        };
+        // Calculate hydrophobic energy using a Gaussian function
+        let energy = -0.5 * (-((distance - optimal_distance).powi(2) / 2.0)).exp();
         
-        Ok(self.params.weight_hydrophobic * hydrophobic_factor)
+        Ok(energy)
     }
     
     fn desolvation_energy(&self, atom1: &Atom, atom2: &Atom, distance: f64) -> Result<f64, ForceFieldError> {
