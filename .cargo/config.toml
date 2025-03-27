@@ -1,0 +1,6 @@
+[doc]
+links = ["https://docs.rs/nalgebra", "https://docs.rs/rayon"]
+
+[doc.extern-map]
+nalgebra = "nalgebra"
+rayon = "rayon" 

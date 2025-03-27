@@ -4,10 +4,13 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Hosein Fooladi <fooladi.hosein@gmail.com>"]
 description = "A Rust implementation of AutoDock Vina molecular docking algorithm"
-license = "Apache-2.0"
+license = "MIT"
 repository = "https://github.com/HFooladi/rustdock-vina"
 keywords = ["molecular-docking", "chemistry", "bioinformatics", "vina", "autodock"]
 categories = ["science", "simulation"]
+readme = "README.md"
+documentation = "https://docs.rs/rustdock-vina"
+homepage = "https://github.com/HFooladi/rustdock-vina"
 
 [dependencies]
 nalgebra = "0.32"  # Linear algebra
