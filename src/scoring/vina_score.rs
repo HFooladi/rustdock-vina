@@ -1,5 +1,5 @@
-use crate::molecule::Molecule;
 use crate::forcefield::vina::VinaForceField;
+use crate::molecule::Molecule;
 
 /// Vina scoring function implementation
 pub struct VinaScore<'a> {

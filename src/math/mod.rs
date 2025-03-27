@@ -1,5 +1,5 @@
 use nalgebra::Vector3;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// A wrapper type for Vector3 that implements Serialize and Deserialize
 #[derive(Debug, Clone, Serialize, Deserialize)]

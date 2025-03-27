@@ -8,33 +8,33 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AtomType {
     // Non-hydrogen types
-    Carbon,       // C
-    Nitrogen,     // N
-    NitrogenH,    // NA (hydrogen bond acceptor)
-    Oxygen,       // O
-    OxygenH,      // OA (hydrogen bond acceptor)
-    Sulfur,       // S
-    SulfurH,      // SA (hydrogen bond acceptor)
-    Phosphorus,   // P
-    Fluorine,     // F
-    Chlorine,     // Cl
-    Bromine,      // Br
-    Iodine,       // I
-    
+    Carbon,     // C
+    Nitrogen,   // N
+    NitrogenH,  // NA (hydrogen bond acceptor)
+    Oxygen,     // O
+    OxygenH,    // OA (hydrogen bond acceptor)
+    Sulfur,     // S
+    SulfurH,    // SA (hydrogen bond acceptor)
+    Phosphorus, // P
+    Fluorine,   // F
+    Chlorine,   // Cl
+    Bromine,    // Br
+    Iodine,     // I
+
     // Hydrogen types
-    Hydrogen,     // H
-    HydrogenD,    // HD (hydrogen bond donor)
-    
+    Hydrogen,  // H
+    HydrogenD, // HD (hydrogen bond donor)
+
     // Metal types
-    Zinc,         // Zn
-    Calcium,      // Ca
-    Manganese,    // Mn
-    Magnesium,    // Mg
-    Iron,         // Fe
-    
+    Zinc,      // Zn
+    Calcium,   // Ca
+    Manganese, // Mn
+    Magnesium, // Mg
+    Iron,      // Fe
+
     // Zinc pseudo-atom
-    ZincPseudo,   // TZ
-    
+    ZincPseudo, // TZ
+
     // For atoms that don't match any of the above
     Unknown,
 }
@@ -66,7 +66,7 @@ impl AtomType {
             AtomType::Unknown => 2.0,     // Default radius
         }
     }
-    
+
     /// Parse atom type from string representation in PDBQT format
     pub fn from_pdbqt_string(s: &str) -> Self {
         match s.trim().to_uppercase().as_str() {
@@ -93,7 +93,7 @@ impl AtomType {
             _ => AtomType::Unknown,
         }
     }
-    
+
     /// Convert atom type to PDBQT string
     pub fn to_pdbqt_string(&self) -> &'static str {
         match self {
@@ -125,30 +125,30 @@ impl AtomType {
 /// Represents an atom in 3D space
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Atom {
-    /// Atom type 
+    /// Atom type
     pub atom_type: AtomType,
-    
+
     /// 3D coordinates (in Angstroms)
     pub coordinates: Vector3<f64>,
-    
+
     /// Atom name from PDB format (e.g., "CA", "N", "O")
     pub name: String,
-    
+
     /// Atom serial number from PDB
     pub serial: u32,
-    
+
     /// Residue name this atom belongs to
     pub residue_name: String,
-    
+
     /// Residue number this atom belongs to
     pub residue_num: u32,
-    
+
     /// Chain identifier
     pub chain_id: char,
-    
+
     /// Partial charge
     pub charge: f64,
-    
+
     /// Is this atom part of a flexible side chain?
     pub is_flexible: bool,
 }
@@ -177,17 +177,17 @@ impl Atom {
             is_flexible: false,
         }
     }
-    
+
     /// Calculate distance to another atom
     pub fn distance(&self, other: &Atom) -> f64 {
         (self.coordinates - other.coordinates).norm()
     }
-    
+
     /// Check if this atom can form hydrogen bonds
     pub fn is_h_bond_donor(&self) -> bool {
         matches!(self.atom_type, AtomType::HydrogenD)
     }
-    
+
     /// Check if this atom can accept hydrogen bonds
     pub fn is_h_bond_acceptor(&self) -> bool {
         matches!(

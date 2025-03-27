@@ -1,7 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use nalgebra::Point3;
 use rustdock_vina::grid::Grid;
 use rustdock_vina::molecule::Molecule;
-use nalgebra::Point3;
 
 fn bench_grid_creation(c: &mut Criterion) {
     c.bench_function("grid_creation", |b| {
@@ -22,7 +22,7 @@ fn bench_grid_interpolation(c: &mut Criterion) {
         Point3::new(20.0, 20.0, 20.0),
         0.375,
     );
-    
+
     c.bench_function("grid_interpolation", |b| {
         b.iter(|| {
             let point = Point3::new(10.0, 10.0, 10.0);
@@ -38,7 +38,7 @@ fn bench_grid_population(c: &mut Criterion) {
         Point3::new(20.0, 20.0, 20.0),
         0.375,
     );
-    
+
     c.bench_function("grid_population", |b| {
         b.iter(|| {
             black_box(grid.populate_from_molecule(&mol));
@@ -52,4 +52,4 @@ criterion_group!(
     bench_grid_interpolation,
     bench_grid_population
 );
-criterion_main!(grid_benches); 
+criterion_main!(grid_benches);
