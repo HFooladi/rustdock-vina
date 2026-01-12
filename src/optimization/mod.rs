@@ -1,5 +1,6 @@
 //! Optimization algorithms for molecular docking
 
+pub mod local;
 pub mod monte_carlo;
 
 use crate::forcefield::ForceField;
@@ -47,7 +48,8 @@ pub trait Optimizer {
     /// Optimize the position, orientation and conformation of a molecule
     fn optimize(
         &self,
-        molecule: &Molecule,
+        ligand: &Molecule,
+        receptor: &Molecule,
         forcefield: &dyn ForceField,
         center: Vector3<f64>,
         box_size: Vector3<f64>,
@@ -57,7 +59,8 @@ pub trait Optimizer {
     /// Generate multiple docking poses
     fn generate_poses(
         &self,
-        molecule: &Molecule,
+        ligand: &Molecule,
+        receptor: &Molecule,
         forcefield: &dyn ForceField,
         center: Vector3<f64>,
         box_size: Vector3<f64>,

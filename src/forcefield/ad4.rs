@@ -297,6 +297,46 @@ impl ForceField for AD4ForceField {
 
         Ok(energy)
     }
+
+    fn hydrophobic_energy(
+        &self,
+        atom1: &Atom,
+        atom2: &Atom,
+        distance: f64,
+    ) -> Result<f64, ForceFieldError> {
+        // Check if both atoms are hydrophobic (carbon or sulfur)
+        let is_hydrophobic1 = matches!(
+            atom1.atom_type,
+            AtomType::Carbon | AtomType::Sulfur | AtomType::SulfurH
+        );
+        let is_hydrophobic2 = matches!(
+            atom2.atom_type,
+            AtomType::Carbon | AtomType::Sulfur | AtomType::SulfurH
+        );
+
+        if !is_hydrophobic1 || !is_hydrophobic2 {
+            return Ok(0.0);
+        }
+
+        // Parameters for hydrophobic interaction
+        let optimal_distance = 4.0; // Angstroms
+        let cutoff = 8.0; // Angstroms
+
+        if distance > cutoff || distance < 0.01 {
+            return Ok(0.0);
+        }
+
+        // Calculate hydrophobic energy using a simple model
+        // Similar to AutoDock4's desolvation-based hydrophobic term
+        let normalized_dist = (distance - optimal_distance) / (cutoff - optimal_distance);
+        let energy = if distance <= optimal_distance {
+            -0.7 // Strong hydrophobic interaction at close range
+        } else {
+            -0.7 * (1.0 - normalized_dist.powi(2))
+        };
+
+        Ok(energy)
+    }
 }
 
 // Additional methods specific to AutoDock4
@@ -304,5 +344,33 @@ impl AD4ForceField {
     /// Calculate the torsional entropy penalty
     pub fn torsional_entropy(&self, num_rotatable_bonds: usize) -> f64 {
         self.params.weight_tors * num_rotatable_bonds as f64
+    }
+
+    /// Get epsilon (well depth) parameter for an atom type
+    fn get_epsilon(&self, atom: &Atom) -> Result<f64, ForceFieldError> {
+        // Return well depth based on atom type (kcal/mol)
+        // These values are from the AutoDock4 parameter file
+        Ok(match atom.atom_type {
+            AtomType::Carbon => 0.1500,
+            AtomType::Nitrogen => 0.1600,
+            AtomType::NitrogenH => 0.1600,
+            AtomType::Oxygen => 0.2000,
+            AtomType::OxygenH => 0.2000,
+            AtomType::Sulfur => 0.2000,
+            AtomType::SulfurH => 0.2000,
+            AtomType::Phosphorus => 0.2000,
+            AtomType::Hydrogen => 0.0200,
+            AtomType::HydrogenD => 0.0200,
+            AtomType::Fluorine => 0.0800,
+            AtomType::Chlorine => 0.2760,
+            AtomType::Bromine => 0.3890,
+            AtomType::Iodine => 0.5500,
+            AtomType::Zinc => 0.5500,
+            AtomType::Calcium => 0.5500,
+            AtomType::Manganese => 0.0130,
+            AtomType::Magnesium => 0.8750,
+            AtomType::Iron => 0.0100,
+            _ => 0.1000, // Default fallback
+        })
     }
 }

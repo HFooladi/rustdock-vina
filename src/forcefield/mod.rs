@@ -21,7 +21,8 @@ pub enum ForceFieldError {
 }
 
 /// Trait representing a forcefield that can calculate interaction energies
-pub trait ForceField {
+/// The Send + Sync bounds enable parallel docking with rayon
+pub trait ForceField: Send + Sync {
     /// Get the name of the forcefield
     fn name(&self) -> &'static str;
 
@@ -55,6 +56,14 @@ pub trait ForceField {
 
     /// Calculate desolvation energy
     fn desolvation_energy(
+        &self,
+        atom1: &Atom,
+        atom2: &Atom,
+        distance: f64,
+    ) -> Result<f64, ForceFieldError>;
+
+    /// Calculate hydrophobic interaction energy
+    fn hydrophobic_energy(
         &self,
         atom1: &Atom,
         atom2: &Atom,

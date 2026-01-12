@@ -1,0 +1,12 @@
+REMARK  Test ligand for integration tests
+ROOT
+ATOM      1  C1  LIG L   1       5.000   4.000   2.000  1.00  0.00     0.000 C
+ATOM      2  C2  LIG L   1       6.500   4.000   2.000  1.00  0.00     0.000 C
+ATOM      3  O1  LIG L   1       7.200   5.000   2.000  1.00  0.00    -0.400 OA
+ATOM      4  N1  LIG L   1       7.000   3.000   2.000  1.00  0.00    -0.300 N
+ENDROOT
+BRANCH   2   5
+ATOM      5  C3  LIG L   1       7.000   4.000   3.500  1.00  0.00     0.000 C
+ATOM      6  C4  LIG L   1       8.500   4.000   3.500  1.00  0.00     0.000 C
+ENDBRANCH   2   5
+TORSDOF 1

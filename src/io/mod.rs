@@ -7,7 +7,7 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::atom::{Atom, AtomType};
-use crate::molecule::{Bond, Molecule, Torsion};
+use crate::molecule::{Molecule, Torsion};
 
 /// Errors that can occur during file I/O operations
 #[derive(Error, Debug)]
@@ -100,7 +100,7 @@ pub fn parse_pdbqt<P: AsRef<Path>>(path: P) -> Result<Molecule, IoError> {
             let to_atom = to_atom - 1;
 
             // Add a bond between these atoms (if it doesn't exist already)
-            if let Ok(bond_idx) = molecule.add_bond(from_atom, to_atom, true) {
+            if let Ok(_bond_idx) = molecule.add_bond(from_atom, to_atom, true) {
                 // Push current branch onto stack
                 if !current_branch_atoms.is_empty() {
                     branch_atoms.push(current_branch_atoms);

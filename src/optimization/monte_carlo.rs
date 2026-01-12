@@ -2,10 +2,12 @@
 
 use nalgebra::{Unit, UnitQuaternion, Vector3};
 use rand::prelude::*;
+use rayon::prelude::*;
 use std::f64::consts::PI;
 
 use crate::forcefield::ForceField;
 use crate::molecule::Molecule;
+use crate::optimization::local::LocalOptimizer;
 use crate::optimization::{DockingResult, OptimizationError, Optimizer};
 
 /// Parameters for Monte Carlo search
@@ -34,6 +36,9 @@ pub struct MonteCarloParams {
 
     /// Number of steps without improvement before stopping
     pub steps_without_improvement: usize,
+
+    /// Whether to use local optimization (BFGS) to refine poses
+    pub use_local_optimization: bool,
 }
 
 impl Default for MonteCarloParams {
@@ -47,6 +52,7 @@ impl Default for MonteCarloParams {
             max_rotation: PI / 6.0, // 30 degrees
             max_torsion: PI / 6.0,  // 30 degrees
             steps_without_improvement: 1000,
+            use_local_optimization: true, // Enable local optimization by default
         }
     }
 }
@@ -226,41 +232,55 @@ impl MonteCarlo {
     }
 
     /// Calculate energy using the provided forcefield
+    /// This computes the interaction energy between ligand and receptor
     fn calculate_energy(
         &self,
-        molecule: &Molecule,
+        ligand: &Molecule,
+        receptor: &Molecule,
         forcefield: &dyn ForceField,
     ) -> Result<f64, OptimizationError> {
-        // This is a placeholder - in a real implementation, this would calculate
-        // the interaction energy between the molecule and the receptor
+        let mut total_energy = 0.0;
+        let cutoff = 8.0; // Distance cutoff in Angstroms
 
-        // For now, just return the internal energy of the molecule
-        let energy = molecule.calculate_internal_energy(8.0);
+        // Intermolecular energy: ligand-receptor interactions
+        for lig_atom in &ligand.atoms {
+            for rec_atom in &receptor.atoms {
+                let distance = lig_atom.distance(rec_atom);
+                if distance < cutoff && distance > 0.01 {
+                    let pair_energy = forcefield.atom_pair_energy(lig_atom, rec_atom, distance)?;
+                    total_energy += pair_energy;
+                }
+            }
+        }
 
-        Ok(energy)
+        // Intramolecular energy: ligand internal energy (flexibility penalty)
+        total_energy += ligand.calculate_internal_energy(cutoff);
+
+        Ok(total_energy)
     }
 }
 
 impl Optimizer for MonteCarlo {
     fn optimize(
         &self,
-        molecule: &Molecule,
+        ligand: &Molecule,
+        receptor: &Molecule,
         forcefield: &dyn ForceField,
         center: Vector3<f64>,
         box_size: Vector3<f64>,
         max_steps: usize,
     ) -> Result<DockingResult, OptimizationError> {
         let mut rng = thread_rng();
-        let mut current_molecule = molecule.clone();
+        let mut current_molecule = ligand.clone();
 
         // Calculate initial energy
-        let mut current_energy = self.calculate_energy(&current_molecule, forcefield)?;
+        let mut current_energy = self.calculate_energy(&current_molecule, receptor, forcefield)?;
         let mut best_energy = current_energy;
         let mut best_molecule = current_molecule.clone();
 
         let mut steps_since_improvement = 0;
 
-        for step in 0..max_steps {
+        for _step in 0..max_steps {
             // Create a copy of the current state
             let mut new_molecule = current_molecule.clone();
 
@@ -283,7 +303,8 @@ impl Optimizer for MonteCarlo {
                     let delta_angle = (rng.gen::<f64>() - 0.5) * 2.0 * self.params.max_torsion;
 
                     // Apply torsion
-                    if let Err(e) = self.modify_torsion(&mut new_molecule, torsion_idx, delta_angle)
+                    if let Err(_e) =
+                        self.modify_torsion(&mut new_molecule, torsion_idx, delta_angle)
                     {
                         // Skip this step if torsion modification fails
                         continue;
@@ -297,7 +318,7 @@ impl Optimizer for MonteCarlo {
             }
 
             // Calculate new energy
-            let new_energy = self.calculate_energy(&new_molecule, forcefield)?;
+            let new_energy = self.calculate_energy(&new_molecule, receptor, forcefield)?;
 
             // Decide whether to accept the move (Metropolis criterion)
             let accept = if new_energy <= current_energy {
@@ -330,11 +351,20 @@ impl Optimizer for MonteCarlo {
             }
         }
 
+        // Apply local optimization if enabled
+        if self.params.use_local_optimization {
+            let local_optimizer = LocalOptimizer::new();
+            if let Ok(optimized_energy) =
+                local_optimizer.minimize(&mut best_molecule, receptor, forcefield)
+            {
+                best_energy = optimized_energy;
+            }
+        }
+
         // Create energy components for the result
         let energy_components = vec![
             ("Total".to_string(), best_energy),
-            // In a real implementation, this would include individual components
-            // like vdW, electrostatic, etc.
+            // TODO: Add individual components (vdW, electrostatic, H-bond, etc.)
         ];
 
         Ok(DockingResult {
@@ -347,20 +377,21 @@ impl Optimizer for MonteCarlo {
 
     fn generate_poses(
         &self,
-        molecule: &Molecule,
+        ligand: &Molecule,
+        receptor: &Molecule,
         forcefield: &dyn ForceField,
         center: Vector3<f64>,
         box_size: Vector3<f64>,
         num_poses: usize,
         max_steps: usize,
     ) -> Result<Vec<DockingResult>, OptimizationError> {
-        let mut results = Vec::with_capacity(num_poses);
+        // Generate poses in parallel using rayon
+        let results: Result<Vec<DockingResult>, OptimizationError> = (0..num_poses)
+            .into_par_iter()
+            .map(|_| self.optimize(ligand, receptor, forcefield, center, box_size, max_steps))
+            .collect();
 
-        // Generate poses
-        for _ in 0..num_poses {
-            let result = self.optimize(molecule, forcefield, center, box_size, max_steps)?;
-            results.push(result);
-        }
+        let mut results = results?;
 
         // Sort by energy
         results.sort_by(|a, b| a.energy.partial_cmp(&b.energy).unwrap());

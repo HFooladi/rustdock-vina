@@ -2,14 +2,12 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use nalgebra::Vector3;
-use std::path::PathBuf;
-
-use rustdock_vina::atom::AtomType;
 use rustdock_vina::forcefield::{ad4::AD4ForceField, vina::VinaForceField, ForceField};
 use rustdock_vina::io::{parse_pdbqt, write_docking_results};
 use rustdock_vina::optimization::{monte_carlo::MonteCarlo, Optimizer};
+use std::path::PathBuf;
 
 /// Command-line arguments for the application
 #[derive(Parser, Debug)]
@@ -208,6 +206,7 @@ fn main() -> Result<()> {
                 );
                 let results = optimizer.generate_poses(
                     &ligand_molecule,
+                    &receptor_molecule,
                     forcefield.as_ref(),
                     center,
                     box_size,
@@ -279,9 +278,27 @@ fn main() -> Result<()> {
             let ligand_molecule = parse_pdbqt(&ligand)
                 .with_context(|| format!("Failed to parse ligand file: {}", ligand.display()))?;
 
-            // This is a placeholder - in a real implementation,
-            // we would calculate the interaction energy between the ligand and receptor
+            // Calculate interaction energy between ligand and receptor
+            let cutoff = 8.0;
+            let mut total_energy = 0.0;
 
+            for lig_atom in &ligand_molecule.atoms {
+                for rec_atom in &receptor_molecule.atoms {
+                    let distance = lig_atom.distance(rec_atom);
+                    if distance < cutoff && distance > 0.01 {
+                        if let Ok(pair_energy) =
+                            forcefield.atom_pair_energy(lig_atom, rec_atom, distance)
+                        {
+                            total_energy += pair_energy;
+                        }
+                    }
+                }
+            }
+
+            // Add internal energy
+            total_energy += ligand_molecule.calculate_internal_energy(cutoff);
+
+            println!("Affinity: {:.4} (kcal/mol)", total_energy);
             info!("Scoring completed successfully");
         }
     }

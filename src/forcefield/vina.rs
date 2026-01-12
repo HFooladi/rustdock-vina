@@ -101,11 +101,16 @@ impl ForceField for VinaForceField {
         let r2 = atom2.atom_type.radius();
         let optimal_dist = r1 + r2;
 
-        // Gaussian attractive term
+        // Gaussian attractive term 1 (short-range)
         let gauss1 = self.params.weight_gauss1
             * (-(distance - optimal_dist - self.params.gaussian_offset).powi(2)
                 / (2.0 * self.params.gaussian_width.powi(2)))
             .exp();
+
+        // Gaussian attractive term 2 (longer-range, wider Gaussian)
+        // Uses offset of 3.0 and width of 2.0 as per Vina paper
+        let gauss2 = self.params.weight_gauss2
+            * (-(distance - optimal_dist - 3.0).powi(2) / (2.0 * 2.0_f64.powi(2))).exp();
 
         // Repulsive term (only when atoms are too close)
         let repulsion = if distance < optimal_dist {
@@ -114,7 +119,7 @@ impl ForceField for VinaForceField {
             0.0
         };
 
-        Ok(gauss1 + repulsion)
+        Ok(gauss1 + gauss2 + repulsion)
     }
 
     fn electrostatic_energy(
@@ -136,7 +141,7 @@ impl ForceField for VinaForceField {
         distance: f64,
     ) -> Result<f64, ForceFieldError> {
         // Check if we have a hydrogen bond acceptor and donor
-        let (donor, acceptor) = if atom1.is_h_bond_donor() && atom2.is_h_bond_acceptor() {
+        let (_donor, _acceptor) = if atom1.is_h_bond_donor() && atom2.is_h_bond_acceptor() {
             (atom1, atom2)
         } else if atom2.is_h_bond_donor() && atom1.is_h_bond_acceptor() {
             (atom2, atom1)
