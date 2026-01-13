@@ -1,60 +1,122 @@
 //! Implementation of the Vina scoring function
+//!
+//! This implementation follows the original AutoDock Vina scoring function
+//! as described in Trott & Olson, J. Comput. Chem. 2010.
 
 use crate::atom::{Atom, AtomType};
 use crate::forcefield::{ForceField, ForceFieldError};
 use nalgebra::Vector3;
 
 /// Parameters for Vina forcefield
+/// Weights are from the original Vina paper (Trott & Olson, 2010)
 #[derive(Debug, Clone)]
 pub struct VinaParams {
-    // Weights for each component of the scoring function
+    /// Weight for first Gaussian term (steric, short-range attractive)
     pub weight_gauss1: f64,
+    /// Weight for second Gaussian term (steric, longer-range attractive)
     pub weight_gauss2: f64,
+    /// Weight for repulsion term (steric clash penalty)
     pub weight_repulsion: f64,
+    /// Weight for hydrophobic term
     pub weight_hydrophobic: f64,
+    /// Weight for hydrogen bonding term
     pub weight_hydrogen: f64,
+    /// Weight for rotatable bond penalty (entropy)
     pub weight_rot: f64,
-
-    // Gaussian function parameters
-    pub gaussian_offset: f64,
-    pub gaussian_width: f64,
-
-    // Hydrogen bond parameters
-    pub hydrogen_bond_dist_cutoff: f64,
-    pub hydrogen_bond_angle_cutoff: f64,
 }
 
 impl Default for VinaParams {
     fn default() -> Self {
-        // Default parameters from the Vina paper
+        // Exact weights from the original AutoDock Vina
+        // Source: Trott & Olson, J. Comput. Chem. 2010
         Self {
-            weight_gauss1: -0.0356,
-            weight_gauss2: -0.00516,
-            weight_repulsion: 0.840,
-            weight_hydrophobic: -0.0351,
-            weight_hydrogen: -0.587,
+            weight_gauss1: -0.035579,
+            weight_gauss2: -0.005156,
+            weight_repulsion: 0.840245,
+            weight_hydrophobic: -0.035069,
+            weight_hydrogen: -0.587439,
             weight_rot: 0.05846,
-
-            gaussian_offset: 0.0,
-            gaussian_width: 0.5,
-
-            hydrogen_bond_dist_cutoff: 4.0,
-            hydrogen_bond_angle_cutoff: 120.0,
         }
     }
 }
 
 /// Implementation of the Vina scoring function
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct VinaForceField {
     pub params: VinaParams,
 }
 
-impl Default for VinaForceField {
-    fn default() -> Self {
-        Self {
-            params: VinaParams::default(),
-        }
+impl VinaForceField {
+    /// Create a new VinaForceField with default parameters
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Calculate the surface distance between two atoms
+    /// This is distance minus the sum of van der Waals radii
+    #[inline]
+    fn surface_distance(atom1: &Atom, atom2: &Atom, distance: f64) -> f64 {
+        let r1 = atom1.atom_type.radius();
+        let r2 = atom2.atom_type.radius();
+        distance - r1 - r2
+    }
+
+    /// Check if an atom type is hydrophobic (carbon-like)
+    #[inline]
+    fn is_hydrophobic(atom_type: AtomType) -> bool {
+        matches!(
+            atom_type,
+            AtomType::Carbon
+                | AtomType::Fluorine
+                | AtomType::Chlorine
+                | AtomType::Bromine
+                | AtomType::Iodine
+        )
+    }
+
+    /// Check if an atom type can be a hydrogen bond donor
+    /// In PDBQT, NA/OA/SA are marked as acceptors but in practice they often
+    /// have attached hydrogens and can also act as donors
+    #[inline]
+    fn is_hbond_donor(atom_type: AtomType) -> bool {
+        // NitrogenH, OxygenH, SulfurH correspond to PDBQT NA, OA, SA
+        // which can be both donors and acceptors (like Vina's N_DA, O_DA types)
+        matches!(
+            atom_type,
+            AtomType::NitrogenH | AtomType::OxygenH | AtomType::SulfurH
+        )
+    }
+
+    /// Check if an atom type can be a hydrogen bond acceptor
+    #[inline]
+    fn is_hbond_acceptor(atom_type: AtomType) -> bool {
+        // All nitrogen/oxygen/sulfur types can accept H-bonds
+        matches!(
+            atom_type,
+            AtomType::Nitrogen
+                | AtomType::NitrogenH
+                | AtomType::Oxygen
+                | AtomType::OxygenH
+                | AtomType::Sulfur
+                | AtomType::SulfurH
+        )
+    }
+
+    /// Calculate the conformational entropy penalty for rotatable bonds
+    /// This is added to the final score: penalty = weight_rot * N_rot
+    pub fn rotatable_bond_penalty(&self, num_rotatable_bonds: usize) -> f64 {
+        self.params.weight_rot * num_rotatable_bonds as f64
+    }
+
+    /// Calculate the full interaction energy and apply torsional normalization
+    /// affinity = (intermolecular_energy) / (1 + weight_rot * N_rot)
+    pub fn calculate_affinity(
+        &self,
+        intermolecular_energy: f64,
+        num_rotatable_bonds: usize,
+    ) -> f64 {
+        let divisor = 1.0 + self.params.weight_rot * num_rotatable_bonds as f64;
+        intermolecular_energy / divisor
     }
 }
 
@@ -69,20 +131,22 @@ impl ForceField for VinaForceField {
         atom2: &Atom,
         distance: f64,
     ) -> Result<f64, ForceFieldError> {
-        // Early return if distance is too large
-        if distance > 8.0 {
+        // Cutoff distance (8 Angstroms)
+        if distance > 8.0 || distance < 0.01 {
             return Ok(0.0);
         }
 
-        // Calculate all interaction components
-        let vdw = self.vdw_energy(atom1, atom2, distance)?;
-        let hbond = self.hbond_energy(atom1, atom2, distance)?;
-        let hydrophobic = self.hydrophobic_energy(atom1, atom2, distance)?;
-        let elec = self.electrostatic_energy(atom1, atom2, distance)?;
-        let desol = self.desolvation_energy(atom1, atom2, distance)?;
+        // Calculate surface distance (d = r - r1 - r2)
+        let d = Self::surface_distance(atom1, atom2, distance);
 
-        // Sum all components
-        Ok(vdw + hbond + hydrophobic + elec + desol)
+        // Calculate all interaction components
+        let gauss1 = self.gauss1_term(d);
+        let gauss2 = self.gauss2_term(d);
+        let repulsion = self.repulsion_term(d);
+        let hydrophobic = self.hydrophobic_term(atom1, atom2, d);
+        let hbond = self.hbond_term(atom1, atom2, d);
+
+        Ok(gauss1 + gauss2 + repulsion + hydrophobic + hbond)
     }
 
     fn vdw_energy(
@@ -91,47 +155,29 @@ impl ForceField for VinaForceField {
         atom2: &Atom,
         distance: f64,
     ) -> Result<f64, ForceFieldError> {
-        // Skip if atoms are too close
-        if distance < 0.01 {
+        if distance > 8.0 || distance < 0.01 {
             return Ok(0.0);
         }
 
-        // Calculate optimal distance (sum of vdW radii)
-        let r1 = atom1.atom_type.radius();
-        let r2 = atom2.atom_type.radius();
-        let optimal_dist = r1 + r2;
+        let d = Self::surface_distance(atom1, atom2, distance);
 
-        // Gaussian attractive term 1 (short-range)
-        let gauss1 = self.params.weight_gauss1
-            * (-(distance - optimal_dist - self.params.gaussian_offset).powi(2)
-                / (2.0 * self.params.gaussian_width.powi(2)))
-            .exp();
-
-        // Gaussian attractive term 2 (longer-range, wider Gaussian)
-        // Uses offset of 3.0 and width of 2.0 as per Vina paper
-        let gauss2 = self.params.weight_gauss2
-            * (-(distance - optimal_dist - 3.0).powi(2) / (2.0 * 2.0_f64.powi(2))).exp();
-
-        // Repulsive term (only when atoms are too close)
-        let repulsion = if distance < optimal_dist {
-            self.params.weight_repulsion * (optimal_dist - distance).powi(2)
-        } else {
-            0.0
-        };
+        // van der Waals in Vina is gauss1 + gauss2 + repulsion
+        let gauss1 = self.gauss1_term(d);
+        let gauss2 = self.gauss2_term(d);
+        let repulsion = self.repulsion_term(d);
 
         Ok(gauss1 + gauss2 + repulsion)
     }
 
     fn electrostatic_energy(
         &self,
-        atom1: &Atom,
-        atom2: &Atom,
-        distance: f64,
+        _atom1: &Atom,
+        _atom2: &Atom,
+        _distance: f64,
     ) -> Result<f64, ForceFieldError> {
-        // Simplified electrostatic interaction with distance-dependent dielectric
-        // In the original Vina, this is handled differently
-        let e = 332.0 * atom1.charge * atom2.charge / (distance * distance);
-        Ok(e)
+        // Original Vina does not have an explicit electrostatic term
+        // Electrostatics are implicitly captured in the empirical weights
+        Ok(0.0)
     }
 
     fn hbond_energy(
@@ -140,35 +186,12 @@ impl ForceField for VinaForceField {
         atom2: &Atom,
         distance: f64,
     ) -> Result<f64, ForceFieldError> {
-        // Check if we have a hydrogen bond acceptor and donor
-        let (_donor, _acceptor) = if atom1.is_h_bond_donor() && atom2.is_h_bond_acceptor() {
-            (atom1, atom2)
-        } else if atom2.is_h_bond_donor() && atom1.is_h_bond_acceptor() {
-            (atom2, atom1)
-        } else {
-            // No hydrogen bond possible
-            return Ok(0.0);
-        };
-
-        // Check distance criteria
-        if distance > self.params.hydrogen_bond_dist_cutoff {
+        if distance > 8.0 || distance < 0.01 {
             return Ok(0.0);
         }
 
-        // In a real implementation, we would check the angle here as well
-        // For now, we'll use a simple distance-based model
-
-        // Calculate hydrogen bond strength based on distance
-        let optimal_dist = 1.9; // Typical H-bond distance
-        let strength = if distance <= optimal_dist {
-            1.0
-        } else {
-            let normalized_dist =
-                (distance - optimal_dist) / (self.params.hydrogen_bond_dist_cutoff - optimal_dist);
-            1.0 - normalized_dist
-        };
-
-        Ok(self.params.weight_hydrogen * strength)
+        let d = Self::surface_distance(atom1, atom2, distance);
+        Ok(self.hbond_term(atom1, atom2, d))
     }
 
     fn hydrophobic_energy(
@@ -177,92 +200,193 @@ impl ForceField for VinaForceField {
         atom2: &Atom,
         distance: f64,
     ) -> Result<f64, ForceFieldError> {
-        // Check if both atoms are hydrophobic
-        let is_hydrophobic1 = matches!(atom1.atom_type, AtomType::Carbon);
-        let is_hydrophobic2 = matches!(atom2.atom_type, AtomType::Carbon);
-
-        if !is_hydrophobic1 || !is_hydrophobic2 {
+        if distance > 8.0 || distance < 0.01 {
             return Ok(0.0);
         }
 
-        // Parameters for hydrophobic interaction
-        let optimal_distance = 4.5; // Angstroms
-        let cutoff = 8.0; // Angstroms
-
-        if distance > cutoff {
-            return Ok(0.0);
-        }
-
-        // Calculate hydrophobic energy using a Gaussian function
-        let energy = -0.5 * (-((distance - optimal_distance).powi(2) / 2.0)).exp();
-
-        Ok(energy)
+        let d = Self::surface_distance(atom1, atom2, distance);
+        Ok(self.hydrophobic_term(atom1, atom2, d))
     }
 
     fn desolvation_energy(
         &self,
-        atom1: &Atom,
-        atom2: &Atom,
-        distance: f64,
+        _atom1: &Atom,
+        _atom2: &Atom,
+        _distance: f64,
     ) -> Result<f64, ForceFieldError> {
-        // Simplified desolvation model
-        // In a real implementation, this would be more complex
-
-        // Default solvation parameters
-        let sol1 = match atom1.atom_type {
-            AtomType::Carbon => 0.6,
-            AtomType::Oxygen | AtomType::OxygenH => -1.0,
-            AtomType::Nitrogen | AtomType::NitrogenH => -1.0,
-            AtomType::Sulfur | AtomType::SulfurH => 0.6,
-            _ => 0.0,
-        };
-
-        let sol2 = match atom2.atom_type {
-            AtomType::Carbon => 0.6,
-            AtomType::Oxygen | AtomType::OxygenH => -1.0,
-            AtomType::Nitrogen | AtomType::NitrogenH => -1.0,
-            AtomType::Sulfur | AtomType::SulfurH => 0.6,
-            _ => 0.0,
-        };
-
-        // Calculate desolvation energy
-        let desolv_cutoff = 8.0;
-
-        if distance > desolv_cutoff {
-            return Ok(0.0);
-        }
-
-        // Desolvation factor
-        let factor = 1.0 - (distance / desolv_cutoff).powi(2);
-        let energy = factor * sol1 * sol2;
-
-        Ok(energy)
+        // Original Vina does not have an explicit desolvation term
+        // Desolvation is implicitly captured in the empirical weights
+        Ok(0.0)
     }
 
     fn atom_charge_energy(
         &self,
-        atom: &Atom,
-        charge: f64,
-        position: &Vector3<f64>,
+        _atom: &Atom,
+        _charge: f64,
+        _position: &Vector3<f64>,
     ) -> Result<f64, ForceFieldError> {
-        let distance = (atom.coordinates - position).norm();
+        // Not used in Vina scoring
+        Ok(0.0)
+    }
 
-        // Early return if distance is too small or too large
-        if distance < 0.01 || distance > 8.0 {
-            return Ok(0.0);
-        }
-
-        // Coulomb's law with distance-dependent dielectric
-        let energy = 332.0 * atom.charge * charge / (distance * distance);
-
-        Ok(energy)
+    /// Apply Vina's torsional normalization: affinity = energy / (1 + weight_rot * N_rot)
+    fn apply_torsional_normalization(
+        &self,
+        intermolecular_energy: f64,
+        num_rotatable_bonds: usize,
+    ) -> f64 {
+        self.calculate_affinity(intermolecular_energy, num_rotatable_bonds)
     }
 }
 
-// Implement additional methods specific to the Vina forcefield
+// Private implementation of individual scoring terms
 impl VinaForceField {
-    /// Calculate the conformational entropy penalty for rotatable bonds
-    pub fn rotatable_bond_penalty(&self, num_rotatable_bonds: usize) -> f64 {
-        self.params.weight_rot * num_rotatable_bonds as f64
+    /// First Gaussian term: attractive, short-range
+    /// gauss1 = w1 * exp(-(d/0.5)^2) where d is surface distance
+    #[inline]
+    fn gauss1_term(&self, d: f64) -> f64 {
+        // Vina formula: exp(-(d/0.5)^2) = exp(-4*d^2)
+        self.params.weight_gauss1 * (-(d / 0.5).powi(2)).exp()
+    }
+
+    /// Second Gaussian term: attractive, longer-range
+    /// gauss2 = w2 * exp(-((d-3)/2)^2)
+    #[inline]
+    fn gauss2_term(&self, d: f64) -> f64 {
+        // Vina formula: exp(-((d-3)/2)^2)
+        self.params.weight_gauss2 * (-((d - 3.0) / 2.0).powi(2)).exp()
+    }
+
+    /// Repulsion term: penalty for steric clash
+    /// repulsion = w3 * d^2 if d < 0, else 0
+    #[inline]
+    fn repulsion_term(&self, d: f64) -> f64 {
+        if d < 0.0 {
+            self.params.weight_repulsion * d.powi(2)
+        } else {
+            0.0
+        }
+    }
+
+    /// Hydrophobic term: attractive for hydrophobic-hydrophobic contacts
+    /// Uses piecewise linear function:
+    ///   if d < 0.5: 1
+    ///   if 0.5 <= d < 1.5: linear interpolation to 0
+    ///   if d >= 1.5: 0
+    #[inline]
+    fn hydrophobic_term(&self, atom1: &Atom, atom2: &Atom, d: f64) -> f64 {
+        // Both atoms must be hydrophobic
+        if !Self::is_hydrophobic(atom1.atom_type) || !Self::is_hydrophobic(atom2.atom_type) {
+            return 0.0;
+        }
+
+        let h = if d < 0.5 {
+            1.0
+        } else if d < 1.5 {
+            1.5 - d
+        } else {
+            0.0
+        };
+
+        self.params.weight_hydrophobic * h
+    }
+
+    /// Hydrogen bond term: attractive for donor-acceptor pairs
+    /// Uses piecewise linear function:
+    ///   if d < -0.7: 1
+    ///   if -0.7 <= d < 0: linear interpolation
+    ///   if d >= 0: 0
+    #[inline]
+    fn hbond_term(&self, atom1: &Atom, atom2: &Atom, d: f64) -> f64 {
+        // Check for donor-acceptor pair
+        let is_hbond_pair = (Self::is_hbond_donor(atom1.atom_type)
+            && Self::is_hbond_acceptor(atom2.atom_type))
+            || (Self::is_hbond_donor(atom2.atom_type) && Self::is_hbond_acceptor(atom1.atom_type));
+
+        if !is_hbond_pair {
+            return 0.0;
+        }
+
+        let h = if d < -0.7 {
+            1.0
+        } else if d < 0.0 {
+            -d / 0.7
+        } else {
+            0.0
+        };
+
+        self.params.weight_hydrogen * h
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nalgebra::Vector3;
+
+    fn create_test_atom(atom_type: AtomType, x: f64, y: f64, z: f64) -> Atom {
+        Atom::new(
+            atom_type,
+            Vector3::new(x, y, z),
+            "TEST".to_string(),
+            1,                     // serial
+            "TST".to_string(),     // residue_name
+            1,                     // residue_num
+            'A',                   // chain_id
+            0.0,                   // charge
+        )
+    }
+
+    #[test]
+    fn test_gauss1_at_surface() {
+        let ff = VinaForceField::new();
+        // At surface distance d=0, gauss1 should be at maximum
+        let energy = ff.gauss1_term(0.0);
+        assert!(energy < 0.0, "Gauss1 should be negative (attractive)");
+        assert!((energy - ff.params.weight_gauss1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_repulsion_only_when_overlapping() {
+        let ff = VinaForceField::new();
+
+        // No repulsion when d >= 0
+        assert_eq!(ff.repulsion_term(0.0), 0.0);
+        assert_eq!(ff.repulsion_term(1.0), 0.0);
+
+        // Repulsion when d < 0 (atoms overlapping)
+        let rep = ff.repulsion_term(-0.5);
+        assert!(rep > 0.0, "Repulsion should be positive");
+    }
+
+    #[test]
+    fn test_hydrophobic_term() {
+        let ff = VinaForceField::new();
+        let c1 = create_test_atom(AtomType::Carbon, 0.0, 0.0, 0.0);
+        let c2 = create_test_atom(AtomType::Carbon, 4.0, 0.0, 0.0);
+
+        // Carbon-carbon should have hydrophobic interaction
+        let energy = ff.hydrophobic_term(&c1, &c2, 0.3);
+        assert!(energy < 0.0, "Hydrophobic should be attractive (negative)");
+    }
+
+    #[test]
+    fn test_hbond_term() {
+        let ff = VinaForceField::new();
+        let donor = create_test_atom(AtomType::NitrogenH, 0.0, 0.0, 0.0);
+        let acceptor = create_test_atom(AtomType::Oxygen, 2.8, 0.0, 0.0);
+
+        // Should have H-bond interaction at appropriate distance
+        let energy = ff.hbond_term(&donor, &acceptor, -0.5);
+        assert!(energy < 0.0, "H-bond should be attractive (negative)");
+    }
+
+    #[test]
+    fn test_torsional_penalty() {
+        let ff = VinaForceField::new();
+
+        // 6 rotatable bonds (like imatinib)
+        let penalty = ff.rotatable_bond_penalty(6);
+        assert!((penalty - 0.35076).abs() < 0.001);
     }
 }

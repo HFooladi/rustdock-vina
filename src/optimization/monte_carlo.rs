@@ -253,8 +253,9 @@ impl MonteCarlo {
             }
         }
 
-        // Intramolecular energy: ligand internal energy (flexibility penalty)
-        total_energy += ligand.calculate_internal_energy(cutoff);
+        // Note: Internal/intramolecular energy is not included since:
+        // 1. It's constant for a given conformer (doesn't affect relative pose ranking)
+        // 2. In the full Vina formula, internal energy cancels with unbound energy
 
         Ok(total_energy)
     }

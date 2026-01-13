@@ -214,9 +214,22 @@ fn main() -> Result<()> {
                     1000,                       // Max steps per pose
                 )?;
 
-                // Filter results
-                let min_energy = results.first().map(|r| r.energy).unwrap_or(0.0);
-                let filtered_results: Vec<_> = results
+                // Apply torsional normalization: affinity = energy / (1 + weight_rot * N_rot)
+                let num_rotatable_bonds = ligand_molecule.torsions.len();
+                let weight_rot = 0.05846;
+                let divisor = 1.0 + weight_rot * num_rotatable_bonds as f64;
+
+                // Normalize energies and filter results
+                let normalized_results: Vec<_> = results
+                    .into_iter()
+                    .map(|mut r| {
+                        r.energy /= divisor; // Apply torsional normalization
+                        r
+                    })
+                    .collect();
+
+                let min_energy = normalized_results.first().map(|r| r.energy).unwrap_or(0.0);
+                let filtered_results: Vec<_> = normalized_results
                     .into_iter()
                     .filter(|r| r.energy <= min_energy + energy_range)
                     .take(num_modes)
@@ -280,7 +293,15 @@ fn main() -> Result<()> {
 
             // Calculate interaction energy between ligand and receptor
             let cutoff = 8.0;
-            let mut total_energy = 0.0;
+            let mut intermolecular_energy = 0.0;
+            let mut num_pairs = 0;
+            let mut positive_energy = 0.0;
+            let mut negative_energy = 0.0;
+
+            println!("\nLigand atoms: {}", ligand_molecule.atoms.len());
+            println!("Ligand bonds: {}", ligand_molecule.bonds.len());
+            println!("Ligand torsions: {}", ligand_molecule.torsions.len());
+            println!("Receptor atoms: {}", receptor_molecule.atoms.len());
 
             for lig_atom in &ligand_molecule.atoms {
                 for rec_atom in &receptor_molecule.atoms {
@@ -289,16 +310,33 @@ fn main() -> Result<()> {
                         if let Ok(pair_energy) =
                             forcefield.atom_pair_energy(lig_atom, rec_atom, distance)
                         {
-                            total_energy += pair_energy;
+                            intermolecular_energy += pair_energy;
+                            num_pairs += 1;
+                            if pair_energy > 0.0 {
+                                positive_energy += pair_energy;
+                            } else {
+                                negative_energy += pair_energy;
+                            }
                         }
                     }
                 }
             }
 
-            // Add internal energy
-            total_energy += ligand_molecule.calculate_internal_energy(cutoff);
+            // Vina formula: affinity = intermolecular / (1 + weight_rot * N_rot)
+            // The internal energy cancels with unbound energy in the full formula
+            let num_rotatable_bonds = ligand_molecule.torsions.len();
+            let weight_rot = 0.05846;
+            let divisor = 1.0 + weight_rot * num_rotatable_bonds as f64;
+            let affinity = intermolecular_energy / divisor;
+            let torsional_effect = intermolecular_energy - affinity;
 
-            println!("Affinity: {:.4} (kcal/mol)", total_energy);
+            println!("\nScoring breakdown:");
+            println!("  Atom pairs within {}A: {}", cutoff, num_pairs);
+            println!("  Positive energy (repulsion): {:.3}", positive_energy);
+            println!("  Negative energy (attraction): {:.3}", negative_energy);
+            println!("  Intermolecular energy: {:.3}", intermolecular_energy);
+            println!("  Torsional effect: {:.3} ({} rotatable bonds)", torsional_effect, num_rotatable_bonds);
+            println!("\nAffinity: {:.3} (kcal/mol)", affinity);
             info!("Scoring completed successfully");
         }
     }

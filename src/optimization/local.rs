@@ -381,8 +381,7 @@ impl LocalOptimizer {
             }
         }
 
-        // Intramolecular energy
-        total_energy += ligand.calculate_internal_energy(cutoff);
+        // Note: Internal energy not included since it cancels with unbound energy in Vina formula
 
         Ok(total_energy)
     }

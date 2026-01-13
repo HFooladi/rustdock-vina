@@ -42,48 +42,51 @@ pub enum AtomType {
 impl AtomType {
     /// Returns the radius of the atom type in Angstroms
     pub fn radius(&self) -> f64 {
+        // Radii from AutoDock Vina source (xs_vdw_radii in atom_constants.h)
         match self {
-            AtomType::Carbon => 2.0,
-            AtomType::Nitrogen => 1.75,
-            AtomType::NitrogenH => 1.75,
-            AtomType::Oxygen => 1.6,
-            AtomType::OxygenH => 1.6,
+            AtomType::Carbon => 1.9,
+            AtomType::Nitrogen => 1.8,
+            AtomType::NitrogenH => 1.8,
+            AtomType::Oxygen => 1.7,
+            AtomType::OxygenH => 1.7,
             AtomType::Sulfur => 2.0,
             AtomType::SulfurH => 2.0,
             AtomType::Phosphorus => 2.1,
-            AtomType::Fluorine => 1.54,
-            AtomType::Chlorine => 2.04,
-            AtomType::Bromine => 2.165,
-            AtomType::Iodine => 2.36,
+            AtomType::Fluorine => 1.5,
+            AtomType::Chlorine => 1.8,
+            AtomType::Bromine => 2.0,
+            AtomType::Iodine => 2.2,
             AtomType::Hydrogen => 1.0,
             AtomType::HydrogenD => 1.0,
-            AtomType::Zinc => 1.48,
-            AtomType::Calcium => 1.98,
-            AtomType::Manganese => 1.3,
-            AtomType::Magnesium => 1.3,
-            AtomType::Iron => 1.3,
-            AtomType::ZincPseudo => 0.25, // Small radius for pseudo atom
-            AtomType::Unknown => 2.0,     // Default radius
+            AtomType::Zinc => 1.2,     // Metal donor
+            AtomType::Calcium => 1.2,  // Metal donor
+            AtomType::Manganese => 1.2,
+            AtomType::Magnesium => 1.2,
+            AtomType::Iron => 1.2,
+            AtomType::ZincPseudo => 0.25,
+            AtomType::Unknown => 1.9,  // Default to carbon radius
         }
     }
 
     /// Parse atom type from string representation in PDBQT format
     pub fn from_pdbqt_string(s: &str) -> Self {
         match s.trim().to_uppercase().as_str() {
+            "A" => AtomType::Carbon, // Aromatic carbon - same as aliphatic in Vina
             "C" => AtomType::Carbon,
             "N" => AtomType::Nitrogen,
-            "NA" => AtomType::NitrogenH,
+            "NA" => AtomType::NitrogenH, // Nitrogen H-bond acceptor
+            "NS" => AtomType::NitrogenH, // Nitrogen in planar system
             "O" => AtomType::Oxygen,
-            "OA" => AtomType::OxygenH,
+            "OA" => AtomType::OxygenH, // Oxygen H-bond acceptor
             "S" => AtomType::Sulfur,
-            "SA" => AtomType::SulfurH,
+            "SA" => AtomType::SulfurH, // Sulfur H-bond acceptor
             "P" => AtomType::Phosphorus,
             "F" => AtomType::Fluorine,
             "CL" => AtomType::Chlorine,
             "BR" => AtomType::Bromine,
             "I" => AtomType::Iodine,
             "H" => AtomType::Hydrogen,
-            "HD" => AtomType::HydrogenD,
+            "HD" => AtomType::HydrogenD, // Hydrogen H-bond donor
             "ZN" => AtomType::Zinc,
             "CA" => AtomType::Calcium,
             "MN" => AtomType::Manganese,
@@ -218,9 +221,10 @@ mod tests {
 
     #[test]
     fn test_atom_type_radius() {
-        assert_eq!(AtomType::Carbon.radius(), 2.0);
-        assert_eq!(AtomType::Nitrogen.radius(), 1.75);
-        assert_eq!(AtomType::Oxygen.radius(), 1.6);
+        // Radii from AutoDock Vina source
+        assert_eq!(AtomType::Carbon.radius(), 1.9);
+        assert_eq!(AtomType::Nitrogen.radius(), 1.8);
+        assert_eq!(AtomType::Oxygen.radius(), 1.7);
         assert_eq!(AtomType::Hydrogen.radius(), 1.0);
         assert_eq!(AtomType::ZincPseudo.radius(), 0.25);
     }

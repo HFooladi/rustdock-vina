@@ -7,7 +7,7 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::atom::{Atom, AtomType};
-use crate::molecule::{Molecule, Torsion};
+use crate::molecule::{Bond, Molecule, Torsion};
 
 /// Errors that can occur during file I/O operations
 #[derive(Error, Debug)]
@@ -99,17 +99,14 @@ pub fn parse_pdbqt<P: AsRef<Path>>(path: P) -> Result<Molecule, IoError> {
             let from_atom = from_atom - 1;
             let to_atom = to_atom - 1;
 
-            // Add a bond between these atoms (if it doesn't exist already)
-            if let Ok(_bond_idx) = molecule.add_bond(from_atom, to_atom, true) {
-                // Push current branch onto stack
-                if !current_branch_atoms.is_empty() {
-                    branch_atoms.push(current_branch_atoms);
-                }
-
-                // Start a new branch
-                branch_stack.push((from_atom, to_atom));
-                current_branch_atoms = Vec::new();
+            // Push current branch atoms onto stack (if any)
+            if !current_branch_atoms.is_empty() {
+                branch_atoms.push(current_branch_atoms.clone());
             }
+
+            // Start a new branch - store atom indices for later bond creation
+            branch_stack.push((from_atom, to_atom));
+            current_branch_atoms = Vec::new();
         } else if line.starts_with("ENDBRANCH") {
             // Parse ENDBRANCH record
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -121,32 +118,34 @@ pub fn parse_pdbqt<P: AsRef<Path>>(path: P) -> Result<Molecule, IoError> {
             }
 
             if let Some((from_atom, to_atom)) = branch_stack.pop() {
-                // Find the bond index
-                let bond_idx = molecule.bonds.iter().position(|b| {
-                    (b.atom1_idx == from_atom && b.atom2_idx == to_atom)
-                        || (b.atom1_idx == to_atom && b.atom2_idx == from_atom)
-                });
+                // Now both atoms should exist - create the rotatable bond
+                if from_atom < molecule.atoms.len() && to_atom < molecule.atoms.len() {
+                    // Add the rotatable bond
+                    let bond_idx = molecule.bonds.len();
+                    molecule.bonds.push(Bond {
+                        atom1_idx: from_atom,
+                        atom2_idx: to_atom,
+                        rotatable: true,
+                    });
 
-                if let Some(bond_idx) = bond_idx {
-                    // Create a torsion based on this bond
+                    // Create a torsion for this rotatable bond
                     let torsion = Torsion {
                         bond_idx,
                         moving_atoms: current_branch_atoms.clone(),
                         angle: 0.0, // Default angle
                     };
-
                     molecule.torsions.push(torsion);
                 }
 
-                // Pop the previous branch's atoms
+                // Restore previous branch's atoms and add current branch atoms to it
+                let branch_atom_copy = current_branch_atoms.clone();
                 if !branch_atoms.is_empty() {
                     current_branch_atoms = branch_atoms.pop().unwrap();
+                    // Add atoms from this branch to parent branch
+                    current_branch_atoms.extend(branch_atom_copy);
                 } else {
                     current_branch_atoms = Vec::new();
                 }
-
-                // Add this branch's atoms to current branch
-                current_branch_atoms.extend(current_branch_atoms.clone());
             }
         } else if line.starts_with("TORSDOF") {
             // Number of torsional degrees of freedom
