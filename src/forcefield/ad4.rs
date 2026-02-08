@@ -86,17 +86,9 @@ impl Default for AD4Params {
 }
 
 /// Implementation of the AutoDock4 scoring function
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AD4ForceField {
     pub params: AD4Params,
-}
-
-impl Default for AD4ForceField {
-    fn default() -> Self {
-        Self {
-            params: AD4Params::default(),
-        }
-    }
 }
 
 impl ForceField for AD4ForceField {

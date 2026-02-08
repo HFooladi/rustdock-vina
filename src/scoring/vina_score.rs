@@ -4,6 +4,7 @@ use crate::molecule::Molecule;
 /// Vina scoring function implementation
 pub struct VinaScore<'a> {
     molecule: &'a Molecule,
+    #[allow(dead_code)]
     forcefield: &'a VinaForceField,
 }
 

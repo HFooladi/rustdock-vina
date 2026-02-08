@@ -58,13 +58,13 @@ impl AtomType {
             AtomType::Iodine => 2.2,
             AtomType::Hydrogen => 1.0,
             AtomType::HydrogenD => 1.0,
-            AtomType::Zinc => 1.2,     // Metal donor
-            AtomType::Calcium => 1.2,  // Metal donor
+            AtomType::Zinc => 1.2,    // Metal donor
+            AtomType::Calcium => 1.2, // Metal donor
             AtomType::Manganese => 1.2,
             AtomType::Magnesium => 1.2,
             AtomType::Iron => 1.2,
             AtomType::ZincPseudo => 0.25,
-            AtomType::Unknown => 1.9,  // Default to carbon radius
+            AtomType::Unknown => 1.9, // Default to carbon radius
         }
     }
 
@@ -158,6 +158,7 @@ pub struct Atom {
 
 impl Atom {
     /// Create a new atom
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         atom_type: AtomType,
         coordinates: Vector3<f64>,

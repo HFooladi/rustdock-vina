@@ -58,17 +58,9 @@ impl Default for MonteCarloParams {
 }
 
 /// Implementation of Monte Carlo search for molecular docking
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MonteCarlo {
     pub params: MonteCarloParams,
-}
-
-impl Default for MonteCarlo {
-    fn default() -> Self {
-        Self {
-            params: MonteCarloParams::default(),
-        }
-    }
 }
 
 impl MonteCarlo {

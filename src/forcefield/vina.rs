@@ -132,7 +132,7 @@ impl ForceField for VinaForceField {
         distance: f64,
     ) -> Result<f64, ForceFieldError> {
         // Cutoff distance (8 Angstroms)
-        if distance > 8.0 || distance < 0.01 {
+        if !(0.01..=8.0).contains(&distance) {
             return Ok(0.0);
         }
 
@@ -155,7 +155,7 @@ impl ForceField for VinaForceField {
         atom2: &Atom,
         distance: f64,
     ) -> Result<f64, ForceFieldError> {
-        if distance > 8.0 || distance < 0.01 {
+        if !(0.01..=8.0).contains(&distance) {
             return Ok(0.0);
         }
 
@@ -186,7 +186,7 @@ impl ForceField for VinaForceField {
         atom2: &Atom,
         distance: f64,
     ) -> Result<f64, ForceFieldError> {
-        if distance > 8.0 || distance < 0.01 {
+        if !(0.01..=8.0).contains(&distance) {
             return Ok(0.0);
         }
 
@@ -200,7 +200,7 @@ impl ForceField for VinaForceField {
         atom2: &Atom,
         distance: f64,
     ) -> Result<f64, ForceFieldError> {
-        if distance > 8.0 || distance < 0.01 {
+        if !(0.01..=8.0).contains(&distance) {
             return Ok(0.0);
         }
 
@@ -329,11 +329,11 @@ mod tests {
             atom_type,
             Vector3::new(x, y, z),
             "TEST".to_string(),
-            1,                     // serial
-            "TST".to_string(),     // residue_name
-            1,                     // residue_num
-            'A',                   // chain_id
-            0.0,                   // charge
+            1,                 // serial
+            "TST".to_string(), // residue_name
+            1,                 // residue_num
+            'A',               // chain_id
+            0.0,               // charge
         )
     }
 

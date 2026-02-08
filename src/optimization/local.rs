@@ -48,16 +48,9 @@ impl Default for LocalOptimizerParams {
 }
 
 /// Local optimizer using L-BFGS method
+#[derive(Default)]
 pub struct LocalOptimizer {
     pub params: LocalOptimizerParams,
-}
-
-impl Default for LocalOptimizer {
-    fn default() -> Self {
-        Self {
-            params: LocalOptimizerParams::default(),
-        }
-    }
 }
 
 impl LocalOptimizer {
@@ -317,6 +310,7 @@ impl LocalOptimizer {
     }
 
     /// Backtracking line search with Armijo condition
+    #[allow(clippy::too_many_arguments)]
     fn line_search(
         &self,
         molecule: &Molecule,

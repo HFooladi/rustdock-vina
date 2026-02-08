@@ -57,6 +57,7 @@ pub trait Optimizer {
     ) -> Result<DockingResult, OptimizationError>;
 
     /// Generate multiple docking poses
+    #[allow(clippy::too_many_arguments)]
     fn generate_poses(
         &self,
         ligand: &Molecule,

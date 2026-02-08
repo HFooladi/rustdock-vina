@@ -168,7 +168,7 @@ fn main() -> Result<()> {
             })?;
 
             // Parse flexible residues if provided
-            let flex_molecule = if let Some(flex_path) = flex {
+            let _flex_molecule = if let Some(flex_path) = flex {
                 info!("Loading flexible residues: {}", flex_path.display());
                 Some(parse_pdbqt(&flex_path).with_context(|| {
                     format!("Failed to parse flex file: {}", flex_path.display())
@@ -277,7 +277,7 @@ fn main() -> Result<()> {
             })?;
 
             // Parse flexible residues if provided
-            let flex_molecule = if let Some(flex_path) = flex {
+            let _flex_molecule = if let Some(flex_path) = flex {
                 info!("Loading flexible residues: {}", flex_path.display());
                 Some(parse_pdbqt(&flex_path).with_context(|| {
                     format!("Failed to parse flex file: {}", flex_path.display())
@@ -335,7 +335,10 @@ fn main() -> Result<()> {
             println!("  Positive energy (repulsion): {:.3}", positive_energy);
             println!("  Negative energy (attraction): {:.3}", negative_energy);
             println!("  Intermolecular energy: {:.3}", intermolecular_energy);
-            println!("  Torsional effect: {:.3} ({} rotatable bonds)", torsional_effect, num_rotatable_bonds);
+            println!(
+                "  Torsional effect: {:.3} ({} rotatable bonds)",
+                torsional_effect, num_rotatable_bonds
+            );
             println!("\nAffinity: {:.3} (kcal/mol)", affinity);
             info!("Scoring completed successfully");
         }
