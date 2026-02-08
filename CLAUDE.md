@@ -32,6 +32,8 @@ CI runs on every push/PR to `main`. It has three jobs:
 | **Security** | `cargo install cargo-audit` → `cargo audit` | Checks for known vulnerabilities in dependencies |
 | **Documentation** | `cargo doc --no-deps --document-private-items` | Ensures docs compile cleanly |
 
+All three jobs are passing as of 2026-02-08.
+
 **Before any commit, always run:** `cargo fmt && cargo clippy -- -D warnings && cargo test`
 
 ## Project Structure
