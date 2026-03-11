@@ -32,7 +32,7 @@ CI runs on every push/PR to `main`. It has three jobs:
 | **Security** | `cargo install cargo-audit` → `cargo audit` | Checks for known vulnerabilities in dependencies |
 | **Documentation** | `cargo doc --no-deps --document-private-items` | Ensures docs compile cleanly |
 
-All three jobs are passing as of 2026-02-08.
+All three jobs should be passing. Run `gh run list --limit 1` to verify.
 
 **Before any commit, always run:** `cargo fmt && cargo clippy -- -D warnings && cargo test`
 
@@ -80,7 +80,14 @@ benches/                  # Criterion benchmarks: docking, grid, optimization, s
 
 ## Conventions
 
+- Rust edition 2021. Key dependencies: nalgebra (linear algebra), rayon (parallelism), clap (CLI).
 - Library crate name: `rustdock_vina` (underscore). Binary name: `vina`.
 - Unit tests live inside modules (`#[cfg(test)]`). Integration tests in `tests/`.
 - All code changes must pass `cargo fmt`, `cargo clippy -- -D warnings`, and `cargo test` before merging.
 - The release profile uses LTO, single codegen unit, and `opt-level = 3`.
+
+## Gotchas
+
+- Config files use `key = value` format (not TOML/YAML). Only `center_x/y/z` and `size_x/y/z` keys are recognized.
+- Float comparisons in tests use `assert_approx_eq` crate, not raw `==`.
+- The `--center` and `--size` CLI flags use comma-separated values (e.g., `0,0,0`), not spaces.

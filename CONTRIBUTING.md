@@ -19,13 +19,13 @@ We use GitHub to host code, to track issues and feature requests, as well as acc
 5. Make sure your code follows the Rust style guidelines.
 6. Issue that pull request!
 
-## Any contributions you make will be under the Apache License 2.0
+## Any contributions you make will be under the MIT License
 
-When you submit code changes, your submissions are understood to be under the same [Apache License 2.0](LICENSE) that covers the project. Feel free to contact the maintainers if that's a concern.
+When you submit code changes, your submissions are understood to be under the same [MIT License](LICENSE) that covers the project. Feel free to contact the maintainers if that's a concern.
 
-## Report bugs using GitHub's [issue tracker](https://github.com/yourusername/rustdock-vina/issues)
+## Report bugs using GitHub's [issue tracker](https://github.com/HFooladi/rustdock-vina/issues)
 
-We use GitHub issues to track public bugs. Report a bug by [opening a new issue](https://github.com/yourusername/rustdock-vina/issues/new).
+We use GitHub issues to track public bugs. Report a bug by [opening a new issue](https://github.com/HFooladi/rustdock-vina/issues/new).
 
 ## Write bug reports with detail, background, and sample code
 
@@ -48,4 +48,4 @@ We use GitHub issues to track public bugs. Report a bug by [opening a new issue]
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under its Apache License 2.0. 
+By contributing, you agree that your contributions will be licensed under its MIT License. 
