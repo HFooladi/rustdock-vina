@@ -11,8 +11,8 @@ fn test_data_dir() -> PathBuf {
 }
 
 fn bench_vina_scoring(c: &mut Criterion) {
-    let receptor = parse_pdbqt(&test_data_dir().join("receptor.pdbqt")).unwrap();
-    let ligand = parse_pdbqt(&test_data_dir().join("ligand.pdbqt")).unwrap();
+    let receptor = parse_pdbqt(test_data_dir().join("receptor.pdbqt")).unwrap();
+    let ligand = parse_pdbqt(test_data_dir().join("ligand.pdbqt")).unwrap();
     let forcefield = VinaForceField::new();
 
     c.bench_function("vina_scoring", |b| {

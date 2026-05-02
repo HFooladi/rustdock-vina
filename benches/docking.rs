@@ -13,8 +13,8 @@ fn test_data_dir() -> PathBuf {
 }
 
 fn bench_complete_docking(c: &mut Criterion) {
-    let receptor = parse_pdbqt(&test_data_dir().join("receptor.pdbqt")).unwrap();
-    let ligand = parse_pdbqt(&test_data_dir().join("ligand.pdbqt")).unwrap();
+    let receptor = parse_pdbqt(test_data_dir().join("receptor.pdbqt")).unwrap();
+    let ligand = parse_pdbqt(test_data_dir().join("ligand.pdbqt")).unwrap();
     let forcefield = VinaForceField::new();
 
     let params = MonteCarloParams {
