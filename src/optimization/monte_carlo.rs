@@ -2,6 +2,7 @@
 
 use nalgebra::{Unit, UnitQuaternion, Vector3};
 use rand::prelude::*;
+use rand::rngs::StdRng;
 use rayon::prelude::*;
 use std::f64::consts::PI;
 
@@ -39,6 +40,15 @@ pub struct MonteCarloParams {
 
     /// Whether to use local optimization (BFGS) to refine poses
     pub use_local_optimization: bool,
+
+    /// Optional master RNG seed for reproducible runs.
+    ///
+    /// `None` (the default) draws fresh entropy from the OS, so each run
+    /// produces different poses. `Some(seed)` makes [`MonteCarlo::optimize`]
+    /// fully deterministic; [`MonteCarlo::generate_poses`] derives a distinct
+    /// per-pose seed from the master seed so the parallel pose set is also
+    /// reproducible.
+    pub seed: Option<u64>,
 }
 
 impl Default for MonteCarloParams {
@@ -53,6 +63,7 @@ impl Default for MonteCarloParams {
             max_torsion: PI / 6.0,  // 30 degrees
             steps_without_improvement: 1000,
             use_local_optimization: true, // Enable local optimization by default
+            seed: None,
         }
     }
 }
@@ -75,7 +86,7 @@ impl MonteCarlo {
     }
 
     /// Generate a random translation within the search box
-    fn random_translation(&self, rng: &mut ThreadRng) -> Vector3<f64> {
+    fn random_translation(&self, rng: &mut StdRng) -> Vector3<f64> {
         let dx = (rng.gen::<f64>() - 0.5) * 2.0 * self.params.max_translation;
         let dy = (rng.gen::<f64>() - 0.5) * 2.0 * self.params.max_translation;
         let dz = (rng.gen::<f64>() - 0.5) * 2.0 * self.params.max_translation;
@@ -84,7 +95,7 @@ impl MonteCarlo {
     }
 
     /// Generate a random rotation
-    fn random_rotation(&self, rng: &mut ThreadRng) -> UnitQuaternion<f64> {
+    fn random_rotation(&self, rng: &mut StdRng) -> UnitQuaternion<f64> {
         let angle = (rng.gen::<f64>() - 0.5) * 2.0 * self.params.max_rotation;
         let axis = Vector3::new(
             rng.gen::<f64>() - 0.5,
@@ -263,7 +274,10 @@ impl Optimizer for MonteCarlo {
         box_size: Vector3<f64>,
         max_steps: usize,
     ) -> Result<DockingResult, OptimizationError> {
-        let mut rng = thread_rng();
+        let mut rng = match self.params.seed {
+            Some(s) => StdRng::seed_from_u64(s),
+            None => StdRng::from_entropy(),
+        };
         let mut current_molecule = ligand.clone();
 
         // Calculate initial energy
@@ -378,10 +392,20 @@ impl Optimizer for MonteCarlo {
         num_poses: usize,
         max_steps: usize,
     ) -> Result<Vec<DockingResult>, OptimizationError> {
-        // Generate poses in parallel using rayon
+        // Generate poses in parallel using rayon. If a master seed is set, derive
+        // a distinct per-pose seed so the parallel pose set stays reproducible
+        // (each worker still gets an uncorrelated stream because StdRng's
+        // seed_from_u64 hashes the input internally).
+        let master_seed = self.params.seed;
         let results: Result<Vec<DockingResult>, OptimizationError> = (0..num_poses)
             .into_par_iter()
-            .map(|_| self.optimize(ligand, receptor, forcefield, center, box_size, max_steps))
+            .map(|i| {
+                let per_pose = MonteCarlo::with_params(MonteCarloParams {
+                    seed: master_seed.map(|s| s.wrapping_add(i as u64)),
+                    ..self.params.clone()
+                });
+                per_pose.optimize(ligand, receptor, forcefield, center, box_size, max_steps)
+            })
             .collect();
 
         let mut results = results?;

@@ -250,6 +250,77 @@ fn test_forcefield_individual_terms() {
 }
 
 #[test]
+fn test_monte_carlo_seed_is_deterministic() {
+    let receptor = parse_pdbqt(test_data_dir().join("receptor.pdbqt")).unwrap();
+    let ligand = parse_pdbqt(test_data_dir().join("ligand.pdbqt")).unwrap();
+    let forcefield = VinaForceField::default();
+
+    let params = MonteCarloParams {
+        steps_without_improvement: 50,
+        use_local_optimization: false,
+        seed: Some(42),
+        ..MonteCarloParams::default()
+    };
+    let optimizer = MonteCarlo::with_params(params);
+
+    let center = Vector3::new(5.0, 4.0, 2.0);
+    let box_size = Vector3::new(10.0, 10.0, 10.0);
+
+    let a = optimizer
+        .optimize(&ligand, &receptor, &forcefield, center, box_size, 200)
+        .unwrap();
+    let b = optimizer
+        .optimize(&ligand, &receptor, &forcefield, center, box_size, 200)
+        .unwrap();
+
+    assert_eq!(a.energy, b.energy, "same seed must yield same energy");
+    assert_eq!(
+        a.molecule.atoms.len(),
+        b.molecule.atoms.len(),
+        "same seed must yield same atom count"
+    );
+    for (atom_a, atom_b) in a.molecule.atoms.iter().zip(&b.molecule.atoms) {
+        assert_eq!(
+            atom_a.coordinates, atom_b.coordinates,
+            "same seed must yield identical pose coordinates"
+        );
+    }
+}
+
+#[test]
+fn test_generate_poses_seed_is_deterministic() {
+    let receptor = parse_pdbqt(test_data_dir().join("receptor.pdbqt")).unwrap();
+    let ligand = parse_pdbqt(test_data_dir().join("ligand.pdbqt")).unwrap();
+    let forcefield = VinaForceField::default();
+
+    let params = MonteCarloParams {
+        steps_without_improvement: 50,
+        use_local_optimization: false,
+        seed: Some(7),
+        ..MonteCarloParams::default()
+    };
+    let optimizer = MonteCarlo::with_params(params);
+
+    let center = Vector3::new(5.0, 4.0, 2.0);
+    let box_size = Vector3::new(10.0, 10.0, 10.0);
+
+    let first = optimizer
+        .generate_poses(&ligand, &receptor, &forcefield, center, box_size, 3, 100)
+        .unwrap();
+    let second = optimizer
+        .generate_poses(&ligand, &receptor, &forcefield, center, box_size, 3, 100)
+        .unwrap();
+
+    assert_eq!(first.len(), second.len());
+    for (a, b) in first.iter().zip(&second) {
+        assert_eq!(
+            a.energy, b.energy,
+            "same master seed must give same energies"
+        );
+    }
+}
+
+#[test]
 fn test_molecule_center_and_bounding_box() {
     let ligand_path = test_data_dir().join("ligand.pdbqt");
     let ligand = parse_pdbqt(&ligand_path).expect("Failed to parse ligand");
