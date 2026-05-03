@@ -1,1 +1,5 @@
 /target
+
+# Ad-hoc CLI outputs at the repo root (e.g. from `cargo run -- score/dock`).
+# Real fixtures live under benchmark_data/ or tests/test_data/.
+/test_output.pdbqt

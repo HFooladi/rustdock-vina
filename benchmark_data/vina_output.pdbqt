@@ -1,0 +1,280 @@
+MODEL 1
+REMARK VINA RESULT:   -11.865      0.000      0.000
+REMARK INTER + INTRA:         -16.718
+REMARK INTER:                 -16.026
+REMARK INTRA:                  -0.692
+REMARK UNBOUND:                -0.692
+REMARK  Name = ligand_sti.pdb
+REMARK  6 active torsions:
+REMARK  status: ('A' for Active; 'I' for Inactive)
+REMARK    1  A    between atoms: C5_3  and  C7_7
+REMARK    2  A    between atoms: N13_13  and  C14_14
+REMARK    3  A    between atoms: C16_18  and  N21_20
+REMARK    4  A    between atoms: C22_21  and  C23_22
+REMARK    5  A    between atoms: C27_25  and  C46_28
+REMARK    6  A    between atoms: C46_28  and  N48_29
+REMARK                            x       y       z     vdW  Elec       q    Type
+REMARK                         _______ _______ _______ _____ _____    ______ ____
+ROOT
+ATOM      1  C14 STI A 201      15.643  54.679  12.714  0.00  0.00    +0.000 A 
+ATOM      2  C19 STI A 201      16.729  54.463  11.750  0.00  0.00    +0.000 A 
+ATOM      3  C18 STI A 201      17.662  53.404  12.006  0.00  0.00    +0.000 A 
+ATOM      4  C17 STI A 201      17.530  52.575  13.179  0.00  0.00    +0.000 A 
+ATOM      5  C16 STI A 201      16.475  52.780  14.115  0.00  0.00    +0.000 A 
+ATOM      6  C15 STI A 201      15.527  53.854  13.862  0.00  0.00    +0.000 A 
+ATOM      7  C20 STI A 201      16.915  55.316  10.474  0.00  0.00    +0.000 C 
+ENDROOT
+BRANCH   1  14
+ATOM      8  C7  STI A 201      14.333  59.296  12.774  0.00  0.00    +0.000 C 
+ATOM      9  C12 STI A 201      15.617  59.715  13.258  0.00  0.00    +0.000 C 
+ATOM     10  C11 STI A 201      16.584  58.711  13.485  0.00  0.00    +0.000 C 
+ATOM     11  N10 STI A 201      16.279  57.389  13.243  0.00  0.00    +0.000 NA
+ATOM     12  C9  STI A 201      15.031  57.018  12.778  0.00  0.00    +0.000 C 
+ATOM     13  N8  STI A 201      14.089  57.959  12.555  0.00  0.00    +0.000 NA
+ATOM     14  N13 STI A 201      14.705  55.696  12.520  0.00  0.00    +0.000 NA
+BRANCH   8  17
+ATOM     15  C1  STI A 201      12.108  62.508  12.584  0.00  0.00    +0.000 A 
+ATOM     16  C6  STI A 201      13.221  61.639  12.890  0.00  0.00    +0.000 A 
+ATOM     17  C5  STI A 201      13.207  60.239  12.483  0.00  0.00    +0.000 A 
+ATOM     18  C4  STI A 201      12.044  59.747  11.760  0.00  0.00    +0.000 A 
+ATOM     19  N3  STI A 201      10.987  60.608  11.480  0.00  0.00    +0.000 NA
+ATOM     20  C2  STI A 201      10.988  61.956  11.869  0.00  0.00    +0.000 A 
+ENDBRANCH   8  17
+ENDBRANCH   1  14
+BRANCH   5  21
+ATOM     21  N21 STI A 201      16.403  51.905  15.259  0.00  0.00    +0.000 NA
+ATOM     22  C22 STI A 201      15.523  50.857  15.476  0.00  0.00    +0.000 C 
+ATOM     23  O29 STI A 201      14.520  50.648  14.810  0.00  0.00    +0.000 OA
+BRANCH  22  24
+ATOM     24  C23 STI A 201      15.787  49.914  16.604  0.00  0.00    +0.000 A 
+ATOM     25  C25 STI A 201      17.154  49.549  16.986  0.00  0.00    +0.000 A 
+ATOM     26  C26 STI A 201      17.381  48.624  18.068  0.00  0.00    +0.000 A 
+ATOM     27  C27 STI A 201      16.236  48.058  18.777  0.00  0.00    +0.000 A 
+ATOM     28  C28 STI A 201      14.891  48.440  18.381  0.00  0.00    +0.000 A 
+ATOM     29  C29 STI A 201      14.665  49.346  17.321  0.00  0.00    +0.000 A 
+BRANCH  27  30
+ATOM     30  C46 STI A 201      16.384  47.047  19.930  0.00  0.00    +0.000 C 
+BRANCH  30  31
+ATOM     31  N48 STI A 201      17.758  46.816  20.466  0.00  0.00    +0.000 NA
+ATOM     32  C53 STI A 201      18.081  47.818  21.547  0.00  0.00    +0.000 C 
+ATOM     33  C52 STI A 201      19.516  47.609  22.105  0.00  0.00    +0.000 C 
+ATOM     34  N51 STI A 201      19.693  46.189  22.625  0.00  0.00    +0.000 NA
+ATOM     35  C54 STI A 201      21.035  45.939  23.172  0.00  0.00    +0.000 C 
+ATOM     36  C50 STI A 201      19.387  45.162  21.534  0.00  0.00    +0.000 C 
+ATOM     37  C49 STI A 201      17.936  45.392  20.998  0.00  0.00    +0.000 C 
+ENDBRANCH  30  31
+ENDBRANCH  27  30
+ENDBRANCH  22  24
+ENDBRANCH   5  21
+TORSDOF 6
+ENDMDL
+MODEL 2
+REMARK VINA RESULT:    -9.835      1.653     13.696
+REMARK INTER + INTRA:         -13.976
+REMARK INTER:                 -13.843
+REMARK INTRA:                  -0.132
+REMARK UNBOUND:                -0.692
+REMARK  Name = ligand_sti.pdb
+REMARK  6 active torsions:
+REMARK  status: ('A' for Active; 'I' for Inactive)
+REMARK    1  A    between atoms: C5_3  and  C7_7
+REMARK    2  A    between atoms: N13_13  and  C14_14
+REMARK    3  A    between atoms: C16_18  and  N21_20
+REMARK    4  A    between atoms: C22_21  and  C23_22
+REMARK    5  A    between atoms: C27_25  and  C46_28
+REMARK    6  A    between atoms: C46_28  and  N48_29
+REMARK                            x       y       z     vdW  Elec       q    Type
+REMARK                         _______ _______ _______ _____ _____    ______ ____
+ROOT
+ATOM      1  C14 STI A 201      16.620  49.155  17.140  0.00  0.00    +0.000 A 
+ATOM      2  C19 STI A 201      15.326  48.462  17.148  0.00  0.00    +0.000 A 
+ATOM      3  C18 STI A 201      14.186  49.148  16.609  0.00  0.00    +0.000 A 
+ATOM      4  C17 STI A 201      14.316  50.480  16.073  0.00  0.00    +0.000 A 
+ATOM      5  C16 STI A 201      15.572  51.154  16.060  0.00  0.00    +0.000 A 
+ATOM      6  C15 STI A 201      16.730  50.465  16.608  0.00  0.00    +0.000 A 
+ATOM      7  C20 STI A 201      15.130  47.032  17.703  0.00  0.00    +0.000 C 
+ENDROOT
+BRANCH   1  14
+ATOM      8  C7  STI A 201      19.148  47.258  20.752  0.00  0.00    +0.000 C 
+ATOM      9  C12 STI A 201      18.111  47.540  21.703  0.00  0.00    +0.000 C 
+ATOM     10  C11 STI A 201      16.947  48.180  21.224  0.00  0.00    +0.000 C 
+ATOM     11  N10 STI A 201      16.837  48.509  19.890  0.00  0.00    +0.000 NA
+ATOM     12  C9  STI A 201      17.856  48.225  18.999  0.00  0.00    +0.000 C 
+ATOM     13  N8  STI A 201      18.979  47.615  19.433  0.00  0.00    +0.000 NA
+ATOM     14  N13 STI A 201      17.764  48.540  17.652  0.00  0.00    +0.000 NA
+BRANCH   8  17
+ATOM     15  C1  STI A 201      22.750  45.748  20.544  0.00  0.00    +0.000 A 
+ATOM     16  C6  STI A 201      21.526  46.407  20.152  0.00  0.00    +0.000 A 
+ATOM     17  C5  STI A 201      20.436  46.582  21.105  0.00  0.00    +0.000 A 
+ATOM     18  C4  STI A 201      20.620  46.075  22.456  0.00  0.00    +0.000 A 
+ATOM     19  N3  STI A 201      21.809  45.444  22.805  0.00  0.00    +0.000 NA
+ATOM     20  C2  STI A 201      22.864  45.268  21.896  0.00  0.00    +0.000 A 
+ENDBRANCH   8  17
+ENDBRANCH   1  14
+BRANCH   5  21
+ATOM     21  N21 STI A 201      15.624  52.481  15.499  0.00  0.00    +0.000 NA
+ATOM     22  C22 STI A 201      16.171  52.873  14.288  0.00  0.00    +0.000 C 
+ATOM     23  O29 STI A 201      16.893  52.171  13.596  0.00  0.00    +0.000 OA
+BRANCH  22  24
+ATOM     24  C23 STI A 201      15.888  54.250  13.780  0.00  0.00    +0.000 A 
+ATOM     25  C25 STI A 201      14.527  54.666  13.433  0.00  0.00    +0.000 A 
+ATOM     26  C26 STI A 201      14.283  55.994  12.928  0.00  0.00    +0.000 A 
+ATOM     27  C27 STI A 201      15.405  56.917  12.768  0.00  0.00    +0.000 A 
+ATOM     28  C28 STI A 201      16.744  56.479  13.125  0.00  0.00    +0.000 A 
+ATOM     29  C29 STI A 201      16.987  55.178  13.619  0.00  0.00    +0.000 A 
+BRANCH  27  30
+ATOM     30  C46 STI A 201      15.241  58.345  12.217  0.00  0.00    +0.000 C 
+BRANCH  30  31
+ATOM     31  N48 STI A 201      13.966  59.057  12.530  0.00  0.00    +0.000 NA
+ATOM     32  C53 STI A 201      14.242  60.479  12.953  0.00  0.00    +0.000 C 
+ATOM     33  C52 STI A 201      12.929  61.232  13.304  0.00  0.00    +0.000 C 
+ATOM     34  N51 STI A 201      11.959  61.205  12.131  0.00  0.00    +0.000 NA
+ATOM     35  C54 STI A 201      10.700  61.911  12.407  0.00  0.00    +0.000 C 
+ATOM     36  C50 STI A 201      11.656  59.769  11.701  0.00  0.00    +0.000 C 
+ATOM     37  C49 STI A 201      12.993  59.039  11.348  0.00  0.00    +0.000 C 
+ENDBRANCH  30  31
+ENDBRANCH  27  30
+ENDBRANCH  22  24
+ENDBRANCH   5  21
+TORSDOF 6
+ENDMDL
+MODEL 3
+REMARK VINA RESULT:    -9.274      1.640     13.165
+REMARK INTER + INTRA:         -13.219
+REMARK INTER:                 -13.615
+REMARK INTRA:                   0.396
+REMARK UNBOUND:                -0.692
+REMARK  Name = ligand_sti.pdb
+REMARK  6 active torsions:
+REMARK  status: ('A' for Active; 'I' for Inactive)
+REMARK    1  A    between atoms: C5_3  and  C7_7
+REMARK    2  A    between atoms: N13_13  and  C14_14
+REMARK    3  A    between atoms: C16_18  and  N21_20
+REMARK    4  A    between atoms: C22_21  and  C23_22
+REMARK    5  A    between atoms: C27_25  and  C46_28
+REMARK    6  A    between atoms: C46_28  and  N48_29
+REMARK                            x       y       z     vdW  Elec       q    Type
+REMARK                         _______ _______ _______ _____ _____    ______ ____
+ROOT
+ATOM      1  C14 STI A 201      14.925  48.704  18.883  0.00  0.00    +0.000 A 
+ATOM      2  C19 STI A 201      13.563  48.164  18.787  0.00  0.00    +0.000 A 
+ATOM      3  C18 STI A 201      12.650  48.786  17.871  0.00  0.00    +0.000 A 
+ATOM      4  C17 STI A 201      13.065  49.910  17.069  0.00  0.00    +0.000 A 
+ATOM      5  C16 STI A 201      14.387  50.435  17.158  0.00  0.00    +0.000 A 
+ATOM      6  C15 STI A 201      15.317  49.810  18.086  0.00  0.00    +0.000 A 
+ATOM      7  C20 STI A 201      13.066  46.957  19.617  0.00  0.00    +0.000 C 
+ENDROOT
+BRANCH   1  14
+ATOM      8  C7  STI A 201      19.256  46.874  19.847  0.00  0.00    +0.000 C 
+ATOM      9  C12 STI A 201      19.688  47.025  18.487  0.00  0.00    +0.000 C 
+ATOM     10  C11 STI A 201      18.762  47.571  17.570  0.00  0.00    +0.000 C 
+ATOM     11  N10 STI A 201      17.502  47.936  17.992  0.00  0.00    +0.000 NA
+ATOM     12  C9  STI A 201      17.117  47.775  19.310  0.00  0.00    +0.000 C 
+ATOM     13  N8  STI A 201      17.982  47.255  20.205  0.00  0.00    +0.000 NA
+ATOM     14  N13 STI A 201      15.858  48.143  19.758  0.00  0.00    +0.000 NA
+BRANCH   8  17
+ATOM     15  C1  STI A 201      21.809  44.666  21.824  0.00  0.00    +0.000 A 
+ATOM     16  C6  STI A 201      20.994  45.166  20.740  0.00  0.00    +0.000 A 
+ATOM     17  C5  STI A 201      20.120  46.316  20.935  0.00  0.00    +0.000 A 
+ATOM     18  C4  STI A 201      20.094  46.942  22.248  0.00  0.00    +0.000 A 
+ATOM     19  N3  STI A 201      20.888  46.438  23.273  0.00  0.00    +0.000 NA
+ATOM     20  C2  STI A 201      21.732  45.331  23.098  0.00  0.00    +0.000 A 
+ENDBRANCH   8  17
+ENDBRANCH   1  14
+BRANCH   5  21
+ATOM     21  N21 STI A 201      14.731  51.555  16.317  0.00  0.00    +0.000 NA
+ATOM     22  C22 STI A 201      15.867  51.722  15.543  0.00  0.00    +0.000 C 
+ATOM     23  O29 STI A 201      16.866  51.022  15.622  0.00  0.00    +0.000 OA
+BRANCH  22  24
+ATOM     24  C23 STI A 201      15.905  52.835  14.546  0.00  0.00    +0.000 A 
+ATOM     25  C25 STI A 201      14.815  53.810  14.454  0.00  0.00    +0.000 A 
+ATOM     26  C26 STI A 201      14.869  54.864  13.472  0.00  0.00    +0.000 A 
+ATOM     27  C27 STI A 201      16.018  54.948  12.574  0.00  0.00    +0.000 A 
+ATOM     28  C28 STI A 201      17.088  53.971  12.690  0.00  0.00    +0.000 A 
+ATOM     29  C29 STI A 201      17.038  52.936  13.651  0.00  0.00    +0.000 A 
+BRANCH  27  30
+ATOM     30  C46 STI A 201      16.149  56.027  11.482  0.00  0.00    +0.000 C 
+BRANCH  30  31
+ATOM     31  N48 STI A 201      15.512  57.351  11.749  0.00  0.00    +0.000 NA
+ATOM     32  C53 STI A 201      14.021  57.197  11.920  0.00  0.00    +0.000 C 
+ATOM     33  C52 STI A 201      13.335  58.568  12.178  0.00  0.00    +0.000 C 
+ATOM     34  N51 STI A 201      13.941  59.256  13.393  0.00  0.00    +0.000 NA
+ATOM     35  C54 STI A 201      13.323  60.557  13.687  0.00  0.00    +0.000 C 
+ATOM     36  C50 STI A 201      15.452  59.435  13.228  0.00  0.00    +0.000 C 
+ATOM     37  C49 STI A 201      16.114  58.041  12.976  0.00  0.00    +0.000 C 
+ENDBRANCH  30  31
+ENDBRANCH  27  30
+ENDBRANCH  22  24
+ENDBRANCH   5  21
+TORSDOF 6
+ENDMDL
+MODEL 4
+REMARK VINA RESULT:    -8.929      2.136     13.521
+REMARK INTER + INTRA:         -12.753
+REMARK INTER:                 -12.906
+REMARK INTRA:                   0.152
+REMARK UNBOUND:                -0.692
+REMARK  Name = ligand_sti.pdb
+REMARK  6 active torsions:
+REMARK  status: ('A' for Active; 'I' for Inactive)
+REMARK    1  A    between atoms: C5_3  and  C7_7
+REMARK    2  A    between atoms: N13_13  and  C14_14
+REMARK    3  A    between atoms: C16_18  and  N21_20
+REMARK    4  A    between atoms: C22_21  and  C23_22
+REMARK    5  A    between atoms: C27_25  and  C46_28
+REMARK    6  A    between atoms: C46_28  and  N48_29
+REMARK                            x       y       z     vdW  Elec       q    Type
+REMARK                         _______ _______ _______ _____ _____    ______ ____
+ROOT
+ATOM      1  C14 STI A 201      17.500  48.241  19.152  0.00  0.00    +0.000 A 
+ATOM      2  C19 STI A 201      16.385  47.287  19.202  0.00  0.00    +0.000 A 
+ATOM      3  C18 STI A 201      15.344  47.409  18.221  0.00  0.00    +0.000 A 
+ATOM      4  C17 STI A 201      15.399  48.441  17.215  0.00  0.00    +0.000 A 
+ATOM      5  C16 STI A 201      16.482  49.366  17.161  0.00  0.00    +0.000 A 
+ATOM      6  C15 STI A 201      17.539  49.249  18.155  0.00  0.00    +0.000 A 
+ATOM      7  C20 STI A 201      16.277  46.158  20.253  0.00  0.00    +0.000 C 
+ENDROOT
+BRANCH   1  14
+ATOM      8  C7  STI A 201      21.917  46.904  20.471  0.00  0.00    +0.000 C 
+ATOM      9  C12 STI A 201      22.162  46.260  19.212  0.00  0.00    +0.000 C 
+ATOM     10  C11 STI A 201      21.123  46.290  18.255  0.00  0.00    +0.000 C 
+ATOM     11  N10 STI A 201      19.932  46.919  18.546  0.00  0.00    +0.000 NA
+ATOM     12  C9  STI A 201      19.728  47.529  19.770  0.00  0.00    +0.000 C 
+ATOM     13  N8  STI A 201      20.704  47.513  20.701  0.00  0.00    +0.000 NA
+ATOM     14  N13 STI A 201      18.541  48.174  20.081  0.00  0.00    +0.000 NA
+BRANCH   8  17
+ATOM     15  C1  STI A 201      24.787  45.976  22.961  0.00  0.00    +0.000 A 
+ATOM     16  C6  STI A 201      23.839  45.870  21.876  0.00  0.00    +0.000 A 
+ATOM     17  C5  STI A 201      22.918  46.961  21.582  0.00  0.00    +0.000 A 
+ATOM     18  C4  STI A 201      22.984  48.156  22.411  0.00  0.00    +0.000 A 
+ATOM     19  N3  STI A 201      23.907  48.229  23.450  0.00  0.00    +0.000 NA
+ATOM     20  C2  STI A 201      24.797  47.184  23.743  0.00  0.00    +0.000 A 
+ENDBRANCH   8  17
+ENDBRANCH   1  14
+BRANCH   5  21
+ATOM     21  N21 STI A 201      16.472  50.363  16.121  0.00  0.00    +0.000 NA
+ATOM     22  C22 STI A 201      15.506  51.325  15.872  0.00  0.00    +0.000 C 
+ATOM     23  O29 STI A 201      14.395  51.336  16.381  0.00  0.00    +0.000 OA
+BRANCH  22  24
+ATOM     24  C23 STI A 201      15.814  52.426  14.909  0.00  0.00    +0.000 A 
+ATOM     25  C25 STI A 201      15.219  53.756  15.060  0.00  0.00    +0.000 A 
+ATOM     26  C26 STI A 201      15.520  54.795  14.107  0.00  0.00    +0.000 A 
+ATOM     27  C27 STI A 201      16.422  54.507  12.995  0.00  0.00    +0.000 A 
+ATOM     28  C28 STI A 201      17.003  53.181  12.872  0.00  0.00    +0.000 A 
+ATOM     29  C29 STI A 201      16.710  52.159  13.804  0.00  0.00    +0.000 A 
+BRANCH  27  30
+ATOM     30  C46 STI A 201      16.783  55.549  11.919  0.00  0.00    +0.000 C 
+BRANCH  30  31
+ATOM     31  N48 STI A 201      16.117  56.883  12.009  0.00  0.00    +0.000 NA
+ATOM     32  C53 STI A 201      14.621  56.722  12.121  0.00  0.00    +0.000 C 
+ATOM     33  C52 STI A 201      13.906  58.101  12.194  0.00  0.00    +0.000 C 
+ATOM     34  N51 STI A 201      14.441  58.926  13.356  0.00  0.00    +0.000 NA
+ATOM     35  C54 STI A 201      13.793  60.240  13.476  0.00  0.00    +0.000 C 
+ATOM     36  C50 STI A 201      15.956  59.113  13.247  0.00  0.00    +0.000 C 
+ATOM     37  C49 STI A 201      16.647  57.712  13.182  0.00  0.00    +0.000 C 
+ENDBRANCH  30  31
+ENDBRANCH  27  30
+ENDBRANCH  22  24
+ENDBRANCH   5  21
+TORSDOF 6
+ENDMDL
