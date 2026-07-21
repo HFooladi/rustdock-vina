@@ -14,7 +14,6 @@ use std::path::PathBuf;
 #[clap(
     name = "rustdock-vina",
     version = rustdock_vina::VERSION,
-    author = "Author <author@example.com>",
     about = "A Rust implementation of AutoDock Vina for molecular docking"
 )]
 struct Cli {
@@ -96,8 +95,12 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
-    // Initialize logger
-    env_logger::init();
+    // Default to `info` so a run is not silent. Previously every progress
+    // message was suppressed unless the user happened to know to set RUST_LOG,
+    // which is documented nowhere.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp(None)
+        .init();
 
     // Parse command-line arguments
     let cli = Cli::parse();
@@ -118,16 +121,15 @@ fn main() -> Result<()> {
             energy_range,
         } => {
             // Determine scoring function
-            let forcefield: Box<dyn ForceField> = match scoring.to_lowercase().as_str() {
-                "vina" => Box::new(VinaForceField::default()),
-                "ad4" => Box::new(AD4ForceField::default()),
-                _ => {
-                    warn!("Unknown scoring function: {}. Using Vina instead.", scoring);
-                    Box::new(VinaForceField::default())
-                }
-            };
+            let forcefield = select_forcefield(&scoring)?;
 
             info!("Using {} scoring function", forcefield.name());
+
+            if ligand.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "no ligand given: pass at least one --ligand FILE"
+                ));
+            }
 
             // Parse configuration
             let (center, box_size) = match (center, size, config) {
@@ -135,6 +137,18 @@ fn main() -> Result<()> {
                     let center = Vector3::new(c[0], c[1], c[2]);
                     let box_size = Vector3::new(s[0], s[1], s[2]);
                     (center, box_size)
+                }
+                (Some(c), _, _) if c.len() != 3 => {
+                    return Err(anyhow::anyhow!(
+                        "--center needs exactly 3 comma-separated values, got {}",
+                        c.len()
+                    ));
+                }
+                (_, Some(sz), _) if sz.len() != 3 => {
+                    return Err(anyhow::anyhow!(
+                        "--size needs exactly 3 comma-separated values, got {}",
+                        sz.len()
+                    ));
                 }
                 (_, _, Some(config_path)) => {
                     // Parse configuration file
@@ -211,7 +225,7 @@ fn main() -> Result<()> {
                     center,
                     box_size,
                     num_modes * exhaustiveness, // Generate more poses initially
-                    1000,                       // Max steps per pose
+                    mc_steps(&ligand_molecule),
                 )?;
 
                 // Apply torsional normalization: affinity = energy / (1 + weight_rot * N_rot)
@@ -234,6 +248,24 @@ fn main() -> Result<()> {
                     .filter(|r| r.energy <= min_energy + energy_range)
                     .take(num_modes)
                     .collect();
+
+                // Print the familiar Vina mode/affinity/RMSD table. Without
+                // this the command produced no terminal output at all and the
+                // user had to open the output file to learn anything.
+                println!("\nmode |   affinity | rmsd l.b.| rmsd u.b.");
+                println!("     | (kcal/mol) | (A)      | (A)");
+                println!("-----+------------+----------+----------");
+                for (i, r) in filtered_results.iter().enumerate() {
+                    let rmsd = r.rmsd.unwrap_or(0.0);
+                    println!(
+                        "{:4} | {:10.3} | {:8.3} | {:8.3}",
+                        i + 1,
+                        r.energy,
+                        rmsd,
+                        rmsd
+                    );
+                }
+                println!();
 
                 // Write results
                 info!(
@@ -259,14 +291,7 @@ fn main() -> Result<()> {
             scoring,
         } => {
             // Determine scoring function
-            let forcefield: Box<dyn ForceField> = match scoring.to_lowercase().as_str() {
-                "vina" => Box::new(VinaForceField::default()),
-                "ad4" => Box::new(AD4ForceField::default()),
-                _ => {
-                    warn!("Unknown scoring function: {}. Using Vina instead.", scoring);
-                    Box::new(VinaForceField::default())
-                }
-            };
+            let forcefield = select_forcefield(&scoring)?;
 
             info!("Using {} scoring function", forcefield.name());
 
@@ -377,7 +402,13 @@ fn parse_config(config_str: &str) -> Result<(Vector3<f64>, Vector3<f64>)> {
             "size_x" => size_x = Some(value.parse::<f64>()?),
             "size_y" => size_y = Some(value.parse::<f64>()?),
             "size_z" => size_z = Some(value.parse::<f64>()?),
-            _ => {} // Ignore other keys
+            // A real Vina config also carries receptor/ligand/out/exhaustiveness/
+            // num_modes/cpu/seed. None of those are honoured here, so say so
+            // rather than silently running with defaults.
+            other => warn!(
+                "ignoring unsupported config key {other:?}: only center_x/y/z \
+                 and size_x/y/z are recognised"
+            ),
         }
     }
 
@@ -388,6 +419,37 @@ fn parse_config(config_str: &str) -> Result<(Vector3<f64>, Vector3<f64>)> {
         }
         _ => Err(anyhow::anyhow!(
             "Missing configuration values for center or box size"
+        )),
+    }
+}
+
+/// Monte Carlo steps to run per pose.
+///
+/// Each step now includes a local minimization, so far fewer steps are needed
+/// than when a step was a single energy evaluation. Scaled by the ligand's
+/// degrees of freedom, following Vina's heuristic.
+fn mc_steps(ligand: &rustdock_vina::Molecule) -> usize {
+    let dof = 6 + ligand.torsions.len();
+    (8 * dof).clamp(50, 300)
+}
+
+/// Resolve the `--scoring` flag to a force field.
+///
+/// An unrecognized name is an error rather than a silent fall back to Vina:
+/// the old behaviour handed the user Vina results while they believed they had
+/// run something else, and the warning it logged was invisible by default.
+fn select_forcefield(name: &str) -> Result<Box<dyn ForceField>> {
+    match name.to_lowercase().as_str() {
+        "vina" => Ok(Box::new(VinaForceField::default())),
+        "ad4" => {
+            warn!(
+                "The AD4 scoring function is experimental and is not validated \
+                 against AutoDock4; treat its numbers as indicative only."
+            );
+            Ok(Box::new(AD4ForceField::default()))
+        }
+        other => Err(anyhow::anyhow!(
+            "unknown scoring function {other:?} (supported: vina, ad4)"
         )),
     }
 }

@@ -333,3 +333,105 @@ fn test_molecule_center_and_bounding_box() {
     assert!(center.y >= min_coord.y && center.y <= max_coord.y);
     assert!(center.z >= min_coord.z && center.z <= max_coord.z);
 }
+
+/// Path to the 1IEP benchmark fixtures (imatinib bound to Abl kinase).
+fn benchmark_data_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmark_data")
+}
+
+/// Scoring the crystal pose of 1IEP must land close to AutoDock Vina.
+///
+/// Real Vina reports an intermolecular energy of -16.026 for this complex,
+/// which becomes -11.865 kcal/mol after dividing by `1 + 0.05846 * 6`. This is
+/// the test that pins the atom typing: treating every carbon as hydrophobic
+/// and inferring H-bond donors from `NA`/`OA` labels put this near -16.8,
+/// roughly 5 kcal/mol too favourable, and nothing in the suite noticed.
+#[test]
+fn test_1iep_crystal_pose_scores_close_to_vina() {
+    let receptor =
+        parse_pdbqt(benchmark_data_dir().join("receptor.pdbqt")).expect("parse receptor");
+    let ligand = parse_pdbqt(benchmark_data_dir().join("ligand.pdbqt")).expect("parse ligand");
+    let forcefield = VinaForceField::default();
+
+    let mut inter = 0.0;
+    for lig_atom in &ligand.atoms {
+        for rec_atom in &receptor.atoms {
+            let d = lig_atom.distance(rec_atom);
+            if d > 0.01 {
+                inter += forcefield.atom_pair_energy(lig_atom, rec_atom, d).unwrap();
+            }
+        }
+    }
+    let affinity = forcefield.calculate_affinity(inter, ligand.torsions.len());
+
+    const VINA_REFERENCE: f64 = -11.865;
+    const TOLERANCE: f64 = 1.5;
+    assert!(
+        (affinity - VINA_REFERENCE).abs() < TOLERANCE,
+        "1IEP crystal-pose affinity {affinity:.3} kcal/mol is more than \
+         {TOLERANCE} from Vina's {VINA_REFERENCE}"
+    );
+}
+
+/// The ligand's full connectivity must be inferred, not just the rotatable
+/// bonds from the `BRANCH` records.
+///
+/// Imatinib has 37 heavy atoms and 6 rotatable bonds. Parsing used to stop at
+/// those 6 bonds, which left every bond-graph-derived property wrong.
+#[test]
+fn test_ligand_connectivity_is_inferred() {
+    let ligand = parse_pdbqt(benchmark_data_dir().join("ligand.pdbqt")).expect("parse ligand");
+
+    assert_eq!(ligand.torsions.len(), 6, "imatinib has 6 rotatable bonds");
+    assert!(
+        ligand.bonds.len() >= ligand.atoms.len(),
+        "expected full connectivity (>= {} bonds), got {}",
+        ligand.atoms.len(),
+        ligand.bonds.len()
+    );
+    assert!(
+        !ligand.intramolecular_pairs().is_empty(),
+        "a 37-atom ligand must have intramolecular scoring pairs"
+    );
+}
+
+/// A carbon bonded to a heteroatom is `C_P` and must not be hydrophobic.
+#[test]
+fn test_polar_carbons_are_typed_non_hydrophobic() {
+    let receptor =
+        parse_pdbqt(benchmark_data_dir().join("receptor.pdbqt")).expect("parse receptor");
+
+    let carbons = receptor
+        .atoms
+        .iter()
+        .filter(|a| a.atom_type == rustdock_vina::AtomType::Carbon)
+        .count();
+    let hydrophobic_carbons = receptor
+        .atoms
+        .iter()
+        .filter(|a| a.atom_type == rustdock_vina::AtomType::Carbon && a.is_hydrophobic)
+        .count();
+
+    assert!(carbons > 0);
+    assert!(
+        hydrophobic_carbons < carbons,
+        "some carbons must be C_P; got {hydrophobic_carbons} of {carbons} hydrophobic"
+    );
+}
+
+/// This receptor carries no polar hydrogens, so under Vina's typing it has no
+/// hydrogen-bond donors at all.
+#[test]
+fn test_no_donors_without_polar_hydrogens() {
+    let receptor =
+        parse_pdbqt(benchmark_data_dir().join("receptor.pdbqt")).expect("parse receptor");
+
+    assert!(
+        !receptor.atoms.iter().any(|a| a.atom_type.is_hydrogen()),
+        "fixture is expected to have no hydrogens"
+    );
+    assert!(
+        !receptor.atoms.iter().any(|a| a.is_hbond_donor),
+        "no atom can donate a hydrogen bond without a bonded polar hydrogen"
+    );
+}

@@ -2,15 +2,61 @@
 
 A Rust implementation of [AutoDock Vina](https://vina.scripps.edu/) for molecular docking.
 
+> **Status: work in progress — not yet validated for production use.**
+> The scoring function now agrees with AutoDock Vina to about 1 kcal/mol on our
+> one benchmark complex, but the conformational search is much weaker than
+> Vina's and finds the correct pose only part of the time. Please do not treat
+> results from this tool as a substitute for AutoDock Vina yet. See
+> [Status and limitations](#status-and-limitations) for measured numbers.
+
 ## Features
 
-- Multiple scoring functions: Vina, AutoDock4 (AD4), and Vinardo
-- Flexible side chain docking
-- Parallelized Monte Carlo search via [rayon](https://github.com/rayon-rs/rayon)
-- Configuration file support for docking parameters
+- Vina scoring function (gauss, repulsion, hydrophobic, H-bond terms) with
+  bond-graph-derived `xs` atom typing
+- Monte Carlo search with local minimization, parallelized across poses via
+  [rayon](https://github.com/rayon-rs/rayon)
+- RMSD-clustered binding modes
+- Configuration file support for the search box
 - Batch ligand docking with directory output
 - PDBQT file parsing and writing
 - Memory-safe implementation in Rust
+
+## Status and limitations
+
+Measured on 1IEP (imatinib bound to Abl kinase), the one complex in
+`benchmark_data/`, against real AutoDock Vina run on the same input files:
+
+| | AutoDock Vina | rustdock-vina |
+|---|---|---|
+| Affinity of the crystal pose | −11.87 kcal/mol | **−10.93 kcal/mol** |
+| Redocking success (best pose within 2 Å) | ~always | **~40% of runs** |
+| Wall time (8 exhaustiveness, 24 cores) | ~1 s | ~14 s |
+
+What this means in practice:
+
+- **Scoring is close but not exact.** Roughly 1 kcal/mol high on this complex.
+  A single complex is not a validation set.
+- **The search is the weak part.** Runs that fail converge on a secondary site
+  about 12 Å away at roughly −9 kcal/mol. Vina finds that site too and ranks it
+  below the true one; the difference is that Vina reliably also finds the true
+  one. Raising `--exhaustiveness` helps.
+- **Performance is far off.** Every energy evaluation is a full O(N_ligand ×
+  N_receptor) loop. There is no precomputed affinity grid, which is the single
+  biggest reason for the gap.
+
+Known gaps, all of which are unimplemented rather than partially working:
+
+- **Vinardo scoring and flexible side chains are not implemented.** Earlier
+  versions of this README advertised both; `--flex` is accepted and ignored.
+- **The AD4 scoring function is experimental** and is not validated against
+  AutoDock4 — it warns when selected. Its parameter table is a stub.
+- **Output PDBQT is not round-trippable through AutoDock Vina**: no
+  `ROOT`/`BRANCH`/`TORSDOF` records are written, and atom-name columns are
+  offset by one, which also affects some structure viewers.
+- **PDBQT is the only supported format.** There is no receptor preparation
+  step, so inputs must come from MGLTools/ADFR/Meeko.
+- Only `center_x/y/z` and `size_x/y/z` are read from a config file; any other
+  key is reported and ignored.
 
 ## Installation
 
@@ -43,11 +89,11 @@ All `dock` options:
 |------|-------------|---------|
 | `--receptor <FILE>` | PDBQT file containing the receptor (required) | |
 | `--ligand <FILE>` | PDBQT file containing the ligand to dock | |
-| `--flex <FILE>` | PDBQT file containing flexible receptor residues | |
+| `--flex <FILE>` | Accepted but **not implemented** — currently ignored | |
 | `-c, --config <FILE>` | Configuration file for docking parameters | |
 | `--center <X,Y,Z>` | Center of the search box | |
 | `--size <X,Y,Z>` | Size of the search box | |
-| `--scoring <NAME>` | Scoring function: `vina`, `ad4`, or `vinardo` | `vina` |
+| `--scoring <NAME>` | Scoring function: `vina`, or experimental `ad4` | `vina` |
 | `--exhaustiveness <N>` | Search exhaustiveness (higher = more accurate, slower) | `8` |
 | `--num-modes <N>` | Number of binding modes to generate | `9` |
 | `-o, --out <FILE>` | Output file for docking results | |
@@ -68,8 +114,8 @@ All `score` options:
 |------|-------------|---------|
 | `--receptor <FILE>` | PDBQT file containing the receptor (required) | |
 | `--ligand <FILE>` | PDBQT file containing the ligand pose (required) | |
-| `--flex <FILE>` | PDBQT file containing flexible receptor residues | |
-| `--scoring <NAME>` | Scoring function: `vina`, `ad4`, or `vinardo` | `vina` |
+| `--flex <FILE>` | Accepted but **not implemented** — currently ignored | |
+| `--scoring <NAME>` | Scoring function: `vina`, or experimental `ad4` | `vina` |
 
 ### Configuration file
 

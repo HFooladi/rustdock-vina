@@ -8,7 +8,7 @@ use std::f64::consts::PI;
 
 use crate::forcefield::ForceField;
 use crate::molecule::Molecule;
-use crate::optimization::local::LocalOptimizer;
+use crate::optimization::local::{LocalOptimizer, LocalOptimizerParams};
 use crate::optimization::{DockingResult, OptimizationError, Optimizer};
 
 /// Parameters for Monte Carlo search
@@ -41,6 +41,20 @@ pub struct MonteCarloParams {
     /// Whether to use local optimization (BFGS) to refine poses
     pub use_local_optimization: bool,
 
+    /// Whether each run starts from a random placement inside the search box.
+    ///
+    /// This is what makes the search global. Disable it only to refine a pose
+    /// you already have (the equivalent of Vina's `--local_only`); with it off,
+    /// docking a ligand that starts far from the site will not find the site.
+    pub randomize_initial_pose: bool,
+
+    /// Iterations of local minimization applied to each Monte Carlo proposal
+    /// before the Metropolis test.
+    ///
+    /// Kept short because it runs on every step; the winning pose gets a
+    /// full-length minimization at the end.
+    pub refine_iterations: usize,
+
     /// Optional master RNG seed for reproducible runs.
     ///
     /// `None` (the default) draws fresh entropy from the OS, so each run
@@ -54,15 +68,17 @@ pub struct MonteCarloParams {
 impl Default for MonteCarloParams {
     fn default() -> Self {
         Self {
-            temperature: 0.3,
+            temperature: 1.2, // Vina's value; 0.3 froze the walk into its first basin
             prob_translation: 0.5,
             prob_rotation: 0.3,
             prob_torsion: 0.2,
             max_translation: 2.0,
-            max_rotation: PI / 6.0, // 30 degrees
-            max_torsion: PI / 6.0,  // 30 degrees
+            max_rotation: PI / 3.0, // 60 degrees
+            max_torsion: PI / 3.0,  // 60 degrees
             steps_without_improvement: 1000,
             use_local_optimization: true, // Enable local optimization by default
+            randomize_initial_pose: true,
+            refine_iterations: 12,
             seed: None,
         }
     }
@@ -94,174 +110,103 @@ impl MonteCarlo {
         Vector3::new(dx, dy, dz)
     }
 
-    /// Generate a random rotation
+    /// Generate a random rotation of bounded magnitude about a uniformly
+    /// distributed axis.
     fn random_rotation(&self, rng: &mut StdRng) -> UnitQuaternion<f64> {
         let angle = (rng.gen::<f64>() - 0.5) * 2.0 * self.params.max_rotation;
-        let axis = Vector3::new(
-            rng.gen::<f64>() - 0.5,
-            rng.gen::<f64>() - 0.5,
-            rng.gen::<f64>() - 0.5,
-        );
-
-        if axis.norm() > 0.0 {
-            let unit_axis = Unit::new_normalize(axis);
-            UnitQuaternion::from_axis_angle(&unit_axis, angle)
-        } else {
-            // If axis is zero, return identity quaternion
-            UnitQuaternion::identity()
-        }
+        UnitQuaternion::from_axis_angle(&random_axis(rng), angle)
     }
 
-    /// Apply a translation to the molecule
-    fn translate_molecule(&self, molecule: &mut Molecule, translation: &Vector3<f64>) {
-        for atom in &mut molecule.atoms {
-            atom.coordinates += translation;
-        }
-    }
-
-    /// Apply a rotation to the molecule around its center
-    fn rotate_molecule(&self, molecule: &mut Molecule, rotation: &UnitQuaternion<f64>) {
-        // Calculate center of molecule
-        let center = match molecule.center() {
-            Ok(c) => c,
-            Err(_) => return, // No atoms in molecule
-        };
-
-        // Apply rotation around center
-        for atom in &mut molecule.atoms {
-            // Move to origin
-            let pos = atom.coordinates - center;
-
-            // Apply rotation
-            let rotated = rotation.transform_vector(&pos);
-
-            // Move back
-            atom.coordinates = rotated + center;
-        }
-    }
-
-    /// Modify a single torsion angle
-    fn modify_torsion(
+    /// Place the ligand at a uniformly random position and orientation in the
+    /// box, with all torsions randomized.
+    ///
+    /// Placement targets the centroid, so this always succeeds — no rejection
+    /// loop and no fallback to the input pose, which would quietly reintroduce
+    /// a dependence on where the caller happened to put the ligand.
+    fn random_pose_in_box(
         &self,
-        molecule: &mut Molecule,
-        torsion_idx: usize,
-        delta_angle: f64,
-    ) -> Result<(), OptimizationError> {
-        if torsion_idx >= molecule.torsions.len() {
-            return Err(OptimizationError::InvalidInitialState);
-        }
-
-        let torsion = &mut molecule.torsions[torsion_idx];
-        let bond_idx = torsion.bond_idx;
-
-        if bond_idx >= molecule.bonds.len() {
-            return Err(OptimizationError::InvalidInitialState);
-        }
-
-        let bond = &molecule.bonds[bond_idx];
-        let atom1_idx = bond.atom1_idx;
-        let atom2_idx = bond.atom2_idx;
-
-        if atom1_idx >= molecule.atoms.len() || atom2_idx >= molecule.atoms.len() {
-            return Err(OptimizationError::InvalidInitialState);
-        }
-
-        // Get positions of the atoms that define the bond
-        let atom1_pos = molecule.atoms[atom1_idx].coordinates;
-        let atom2_pos = molecule.atoms[atom2_idx].coordinates;
-
-        // Calculate the axis of rotation
-        let axis = Unit::new_normalize(atom2_pos - atom1_pos);
-
-        // Create rotation quaternion
-        let rotation = UnitQuaternion::from_axis_angle(&axis, delta_angle);
-
-        // Apply rotation to all moving atoms
-        for &atom_idx in &torsion.moving_atoms {
-            if atom_idx >= molecule.atoms.len() {
-                return Err(OptimizationError::InvalidInitialState);
-            }
-
-            // Move to origin relative to atom1
-            let pos = molecule.atoms[atom_idx].coordinates - atom1_pos;
-
-            // Apply rotation
-            let rotated = rotation.transform_vector(&pos);
-
-            // Move back
-            molecule.atoms[atom_idx].coordinates = rotated + atom1_pos;
-        }
-
-        // Update torsion angle
-        torsion.angle += delta_angle;
-
-        // Normalize angle to [-PI, PI]
-        while torsion.angle > PI {
-            torsion.angle -= 2.0 * PI;
-        }
-        while torsion.angle < -PI {
-            torsion.angle += 2.0 * PI;
-        }
-
-        Ok(())
-    }
-
-    /// Check if a molecule is within the search box
-    fn is_in_box(
-        &self,
-        molecule: &Molecule,
+        ligand: &Molecule,
         center: &Vector3<f64>,
         box_size: &Vector3<f64>,
-    ) -> bool {
-        let half_size = box_size * 0.5;
-        let min_corner = center - half_size;
-        let max_corner = center + half_size;
+        rng: &mut StdRng,
+    ) -> Molecule {
+        let mut candidate = ligand.clone();
 
-        for atom in &molecule.atoms {
-            let pos = &atom.coordinates;
-
-            if pos.x < min_corner.x
-                || pos.x > max_corner.x
-                || pos.y < min_corner.y
-                || pos.y > max_corner.y
-                || pos.z < min_corner.z
-                || pos.z > max_corner.z
-            {
-                return false;
-            }
+        for i in 0..candidate.torsions.len() {
+            let angle = (rng.gen::<f64>() - 0.5) * 2.0 * PI;
+            let _ = candidate.rotate_torsion(i, angle);
         }
 
-        true
+        candidate.rotate_about_center(&random_orientation(rng));
+
+        let Ok(current_center) = candidate.center() else {
+            return ligand.clone();
+        };
+        let half = box_size * 0.5;
+        let target = Vector3::new(
+            center.x + (rng.gen::<f64>() - 0.5) * 2.0 * half.x,
+            center.y + (rng.gen::<f64>() - 0.5) * 2.0 * half.y,
+            center.z + (rng.gen::<f64>() - 0.5) * 2.0 * half.z,
+        );
+        candidate.translate(&(target - current_center));
+
+        candidate
     }
 
-    /// Calculate energy using the provided forcefield
-    /// This computes the interaction energy between ligand and receptor
-    fn calculate_energy(
+    /// The quantity the search minimizes: receptor interaction plus the
+    /// ligand's own internal energy, so that torsional moves cannot buy
+    /// receptor contacts by folding the ligand into itself.
+    fn objective(
         &self,
         ligand: &Molecule,
         receptor: &Molecule,
         forcefield: &dyn ForceField,
+        intra_pairs: &[(usize, usize)],
     ) -> Result<f64, OptimizationError> {
-        let mut total_energy = 0.0;
-        let cutoff = 8.0; // Distance cutoff in Angstroms
+        Ok(intermolecular_energy(ligand, receptor, forcefield)?
+            + intramolecular_energy(ligand, intra_pairs, forcefield)?)
+    }
+}
 
-        // Intermolecular energy: ligand-receptor interactions
-        for lig_atom in &ligand.atoms {
-            for rec_atom in &receptor.atoms {
-                let distance = lig_atom.distance(rec_atom);
-                if distance < cutoff && distance > 0.01 {
-                    let pair_energy = forcefield.atom_pair_energy(lig_atom, rec_atom, distance)?;
-                    total_energy += pair_energy;
-                }
+/// Intermolecular (ligand-receptor) interaction energy.
+///
+/// This is the quantity the reported affinity is derived from.
+pub(crate) fn intermolecular_energy(
+    ligand: &Molecule,
+    receptor: &Molecule,
+    forcefield: &dyn ForceField,
+) -> Result<f64, OptimizationError> {
+    let mut total = 0.0;
+    for lig_atom in &ligand.atoms {
+        for rec_atom in &receptor.atoms {
+            let distance = lig_atom.distance(rec_atom);
+            if distance > 0.01 {
+                total += forcefield.atom_pair_energy(lig_atom, rec_atom, distance)?;
             }
         }
-
-        // Note: Internal/intramolecular energy is not included since:
-        // 1. It's constant for a given conformer (doesn't affect relative pose ranking)
-        // 2. In the full Vina formula, internal energy cancels with unbound energy
-
-        Ok(total_energy)
     }
+    Ok(total)
+}
+
+/// Intramolecular (ligand self-interaction) energy over the given pairs.
+///
+/// Without this, rotating a torsion is free: the search can fold the ligand
+/// through itself and pay nothing, because only receptor contacts are scored.
+/// It matters exactly when torsions are being sampled, which is always.
+pub(crate) fn intramolecular_energy(
+    ligand: &Molecule,
+    pairs: &[(usize, usize)],
+    forcefield: &dyn ForceField,
+) -> Result<f64, OptimizationError> {
+    let mut total = 0.0;
+    for &(i, j) in pairs {
+        let (a, b) = (&ligand.atoms[i], &ligand.atoms[j]);
+        let distance = a.distance(b);
+        if distance > 0.01 {
+            total += forcefield.atom_pair_energy(a, b, distance)?;
+        }
+    }
+    Ok(total)
 }
 
 impl Optimizer for MonteCarlo {
@@ -278,54 +223,69 @@ impl Optimizer for MonteCarlo {
             Some(s) => StdRng::seed_from_u64(s),
             None => StdRng::from_entropy(),
         };
-        let mut current_molecule = ligand.clone();
+        // Start each run from a random placement inside the box rather than
+        // from the input coordinates. Without this every replica explores the
+        // same basin, "exhaustiveness" buys almost nothing, and a ligand handed
+        // in at its answer is simply handed back.
+        let mut current_molecule = if self.params.randomize_initial_pose {
+            self.random_pose_in_box(ligand, &center, &box_size, &mut rng)
+        } else {
+            ligand.clone()
+        };
+
+        // Topology-derived, so computed once and reused for every evaluation.
+        let intra_pairs = ligand.intramolecular_pairs();
 
         // Calculate initial energy
-        let mut current_energy = self.calculate_energy(&current_molecule, receptor, forcefield)?;
+        let mut current_energy =
+            self.objective(&current_molecule, receptor, forcefield, &intra_pairs)?;
         let mut best_energy = current_energy;
         let mut best_molecule = current_molecule.clone();
 
         let mut steps_since_improvement = 0;
 
+        // Vina's basin-hopping: perturb, minimize, then apply the Metropolis
+        // test to the *minimized* energy. Testing the raw perturbed energy
+        // instead makes the walk hop between unrelaxed configurations and
+        // wastes most proposals, because almost any random nudge raises the
+        // energy before relaxation has a chance to recover it.
+        let refiner = LocalOptimizer::with_params(LocalOptimizerParams {
+            max_iterations: self.params.refine_iterations,
+            ..LocalOptimizerParams::default()
+        });
+        let bounds = Some((&center, &box_size));
+
         for _step in 0..max_steps {
             // Create a copy of the current state
             let mut new_molecule = current_molecule.clone();
 
-            // Choose a type of move
-            let move_type = rng.gen::<f64>();
-
-            if move_type < self.params.prob_translation {
-                // Translation
-                let translation = self.random_translation(&mut rng);
-                self.translate_molecule(&mut new_molecule, &translation);
-            } else if move_type < self.params.prob_translation + self.params.prob_rotation {
-                // Rotation
-                let rotation = self.random_rotation(&mut rng);
-                self.rotate_molecule(&mut new_molecule, &rotation);
-            } else {
-                // Torsion
-                if !new_molecule.torsions.is_empty() {
-                    // Choose a random torsion
-                    let torsion_idx = rng.gen_range(0..new_molecule.torsions.len());
-                    let delta_angle = (rng.gen::<f64>() - 0.5) * 2.0 * self.params.max_torsion;
-
-                    // Apply torsion
-                    if let Err(_e) =
-                        self.modify_torsion(&mut new_molecule, torsion_idx, delta_angle)
-                    {
-                        // Skip this step if torsion modification fails
-                        continue;
-                    }
-                }
+            // Perturb every degree of freedom at once, as Vina does, rather
+            // than picking a single one per step.
+            new_molecule.translate(&self.random_translation(&mut rng));
+            new_molecule.rotate_about_center(&self.random_rotation(&mut rng));
+            for i in 0..new_molecule.torsions.len() {
+                let delta = (rng.gen::<f64>() - 0.5) * 2.0 * self.params.max_torsion;
+                let _ = new_molecule.rotate_torsion(i, delta);
             }
 
             // Check if the molecule is still within the search box
-            if !self.is_in_box(&new_molecule, &center, &box_size) {
+            if !new_molecule.center_within_box(&center, &box_size) {
                 continue;
             }
 
-            // Calculate new energy
-            let new_energy = self.calculate_energy(&new_molecule, receptor, forcefield)?;
+            let new_energy = if self.params.use_local_optimization {
+                refiner
+                    .minimize_in_box_with_intra(
+                        &mut new_molecule,
+                        receptor,
+                        forcefield,
+                        bounds,
+                        &intra_pairs,
+                    )
+                    .unwrap_or(f64::INFINITY)
+            } else {
+                self.objective(&new_molecule, receptor, forcefield, &intra_pairs)?
+            };
 
             // Decide whether to accept the move (Metropolis criterion)
             let accept = if new_energy <= current_energy {
@@ -358,24 +318,34 @@ impl Optimizer for MonteCarlo {
             }
         }
 
-        // Apply local optimization if enabled
+        // Polish the winner with a full-length minimization; the in-loop one is
+        // deliberately truncated for speed.
         if self.params.use_local_optimization {
             let local_optimizer = LocalOptimizer::new();
-            if let Ok(optimized_energy) =
-                local_optimizer.minimize(&mut best_molecule, receptor, forcefield)
-            {
+            if let Ok(optimized_energy) = local_optimizer.minimize_in_box_with_intra(
+                &mut best_molecule,
+                receptor,
+                forcefield,
+                bounds,
+                &intra_pairs,
+            ) {
                 best_energy = optimized_energy;
             }
         }
 
-        // Create energy components for the result
+        // The search minimizes inter + intra, but Vina reports the affinity
+        // from the intermolecular term alone: the ligand's internal energy
+        // cancels against the unbound reference state.
+        let inter = intermolecular_energy(&best_molecule, receptor, forcefield)?;
+        let intra = best_energy - inter;
+
         let energy_components = vec![
-            ("Total".to_string(), best_energy),
-            // TODO: Add individual components (vdW, electrostatic, H-bond, etc.)
+            ("Intermolecular".to_string(), inter),
+            ("Intramolecular".to_string(), intra),
         ];
 
         Ok(DockingResult {
-            energy: best_energy,
+            energy: inter,
             molecule: best_molecule,
             energy_components,
             rmsd: None,
@@ -392,6 +362,11 @@ impl Optimizer for MonteCarlo {
         num_poses: usize,
         max_steps: usize,
     ) -> Result<Vec<DockingResult>, OptimizationError> {
+        // Receptor atoms too far from the box can never interact with any pose
+        // inside it, so drop them once instead of testing them on every one of
+        // the millions of energy evaluations to come.
+        let pruned = prune_receptor(receptor, &center, &box_size, ligand);
+
         // Generate poses in parallel using rayon. If a master seed is set, derive
         // a distinct per-pose seed so the parallel pose set stays reproducible
         // (each worker still gets an uncorrelated stream because StdRng's
@@ -404,7 +379,7 @@ impl Optimizer for MonteCarlo {
                     seed: master_seed.map(|s| s.wrapping_add(i as u64)),
                     ..self.params.clone()
                 });
-                per_pose.optimize(ligand, receptor, forcefield, center, box_size, max_steps)
+                per_pose.optimize(ligand, &pruned, forcefield, center, box_size, max_steps)
             })
             .collect();
 
@@ -412,6 +387,20 @@ impl Optimizer for MonteCarlo {
 
         // Sort by energy
         results.sort_by(|a, b| a.energy.partial_cmp(&b.energy).unwrap());
+
+        // Collapse near-identical poses. The runs are independent, so many of
+        // them land in the same minimum; without this, "9 binding modes" can be
+        // nine copies of one pose.
+        let mut clustered: Vec<DockingResult> = Vec::new();
+        for result in results {
+            let duplicate = clustered
+                .iter()
+                .any(|kept| calculate_rmsd(&result.molecule, &kept.molecule) < MODE_RMSD_THRESHOLD);
+            if !duplicate {
+                clustered.push(result);
+            }
+        }
+        let mut results = clustered;
 
         // Calculate RMSD to best pose
         if !results.is_empty() {
@@ -426,6 +415,77 @@ impl Optimizer for MonteCarlo {
 
         Ok(results)
     }
+}
+
+/// Minimum RMSD between two reported binding modes, in Angstroms.
+///
+/// Vina uses the same idea: modes closer than this are the same answer found
+/// twice, not two distinct hypotheses.
+const MODE_RMSD_THRESHOLD: f64 = 1.0;
+
+/// Drop receptor atoms that cannot reach any ligand pose placed in the box.
+///
+/// A pose's centroid is confined to the box, so no ligand atom can be further
+/// than (half-box + ligand radius) from the box centre; adding the interaction
+/// cutoff gives a conservative bound. This is a cheap stand-in for the
+/// precomputed affinity grid a mature implementation would use.
+fn prune_receptor(
+    receptor: &Molecule,
+    center: &Vector3<f64>,
+    box_size: &Vector3<f64>,
+    ligand: &Molecule,
+) -> Molecule {
+    let ligand_radius = ligand
+        .center()
+        .map(|c| {
+            ligand
+                .atoms
+                .iter()
+                .map(|a| (a.coordinates - c).norm())
+                .fold(0.0, f64::max)
+        })
+        .unwrap_or(0.0);
+
+    let half = box_size * 0.5;
+    let margin = ligand_radius + crate::forcefield::vina::CUTOFF;
+
+    let mut pruned = receptor.clone();
+    pruned.atoms.retain(|atom| {
+        let d = atom.coordinates - center;
+        d.x.abs() <= half.x + margin && d.y.abs() <= half.y + margin && d.z.abs() <= half.z + margin
+    });
+
+    // Bonds and torsions index into the original atom list, so they would be
+    // wrong after pruning. Nothing in the scoring path uses receptor
+    // connectivity — the xs typing flags were already baked into each atom at
+    // parse time — so they are simply dropped.
+    pruned.bonds.clear();
+    pruned.torsions.clear();
+    pruned
+}
+
+/// Sample a rotation axis uniformly over the sphere.
+///
+/// Sampling the components from a cube and normalizing would bias the axis
+/// toward the eight corners; rejection sampling on the unit ball does not.
+fn random_axis(rng: &mut StdRng) -> Unit<Vector3<f64>> {
+    for _ in 0..32 {
+        let v = Vector3::new(
+            rng.gen::<f64>() * 2.0 - 1.0,
+            rng.gen::<f64>() * 2.0 - 1.0,
+            rng.gen::<f64>() * 2.0 - 1.0,
+        );
+        let norm_sq = v.norm_squared();
+        if norm_sq > 1e-12 && norm_sq <= 1.0 {
+            return Unit::new_normalize(v);
+        }
+    }
+    Unit::new_unchecked(Vector3::new(0.0, 0.0, 1.0))
+}
+
+/// Sample a uniformly random orientation.
+fn random_orientation(rng: &mut StdRng) -> UnitQuaternion<f64> {
+    UnitQuaternion::from_axis_angle(&random_axis(rng), (rng.gen::<f64>() - 0.5) * 2.0 * PI)
 }
 
 /// Calculate root mean square deviation between two molecules

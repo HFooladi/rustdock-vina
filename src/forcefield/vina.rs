@@ -3,7 +3,7 @@
 //! This implementation follows the original AutoDock Vina scoring function
 //! as described in Trott & Olson, J. Comput. Chem. 2010.
 
-use crate::atom::{Atom, AtomType};
+use crate::atom::Atom;
 use crate::forcefield::{ForceField, ForceFieldError};
 use nalgebra::Vector3;
 
@@ -40,6 +40,13 @@ impl Default for VinaParams {
     }
 }
 
+/// Interaction cutoff in Angstroms.
+///
+/// Applied to the centre-to-centre distance, matching Vina, which tabulates
+/// its potentials against `r` over `[0, 8]` even though the terms themselves
+/// are functions of the surface distance `r - r1 - r2`.
+pub const CUTOFF: f64 = 8.0;
+
 /// Implementation of the Vina scoring function
 #[derive(Debug, Clone, Default)]
 pub struct VinaForceField {
@@ -61,45 +68,32 @@ impl VinaForceField {
         distance - r1 - r2
     }
 
-    /// Check if an atom type is hydrophobic (carbon-like)
+    /// Whether an atom is hydrophobic, per the `xs` typing assigned from the
+    /// bond graph by
+    /// [`Molecule::assign_xs_types`](crate::molecule::Molecule::assign_xs_types).
+    ///
+    /// This deliberately reads the precomputed flag rather than the atom type:
+    /// Vina's `C_H`/`C_P` split turns on whether the carbon is bonded to a
+    /// heteroatom, which the type alone cannot express.
     #[inline]
-    fn is_hydrophobic(atom_type: AtomType) -> bool {
-        matches!(
-            atom_type,
-            AtomType::Carbon
-                | AtomType::Fluorine
-                | AtomType::Chlorine
-                | AtomType::Bromine
-                | AtomType::Iodine
-        )
+    fn is_hydrophobic(atom: &Atom) -> bool {
+        atom.is_hydrophobic
     }
 
-    /// Check if an atom type can be a hydrogen bond donor
-    /// In PDBQT, NA/OA/SA are marked as acceptors but in practice they often
-    /// have attached hydrogens and can also act as donors
+    /// Whether an atom donates a hydrogen bond, i.e. it is an N/O/S carrying a
+    /// bonded polar hydrogen. Also assigned from the bond graph.
     #[inline]
-    fn is_hbond_donor(atom_type: AtomType) -> bool {
-        // NitrogenH, OxygenH, SulfurH correspond to PDBQT NA, OA, SA
-        // which can be both donors and acceptors (like Vina's N_DA, O_DA types)
-        matches!(
-            atom_type,
-            AtomType::NitrogenH | AtomType::OxygenH | AtomType::SulfurH
-        )
+    fn is_hbond_donor(atom: &Atom) -> bool {
+        atom.is_hbond_donor
     }
 
-    /// Check if an atom type can be a hydrogen bond acceptor
+    /// Whether an atom accepts a hydrogen bond.
+    ///
+    /// Only the acceptor-flagged PDBQT types (`NA`/`OA`/`SA`) qualify; plain
+    /// `N`/`O`/`S` are non-polar in Vina's typing and are excluded.
     #[inline]
-    fn is_hbond_acceptor(atom_type: AtomType) -> bool {
-        // All nitrogen/oxygen/sulfur types can accept H-bonds
-        matches!(
-            atom_type,
-            AtomType::Nitrogen
-                | AtomType::NitrogenH
-                | AtomType::Oxygen
-                | AtomType::OxygenH
-                | AtomType::Sulfur
-                | AtomType::SulfurH
-        )
+    fn is_hbond_acceptor(atom: &Atom) -> bool {
+        atom.atom_type.is_hbond_acceptor()
     }
 
     /// Calculate the conformational entropy penalty for rotatable bonds
@@ -131,8 +125,12 @@ impl ForceField for VinaForceField {
         atom2: &Atom,
         distance: f64,
     ) -> Result<f64, ForceFieldError> {
-        // Cutoff distance (8 Angstroms)
-        if !(0.01..=8.0).contains(&distance) {
+        // Vina scores heavy atoms only; hydrogens are implicit in the weights.
+        if atom1.atom_type.is_hydrogen() || atom2.atom_type.is_hydrogen() {
+            return Ok(0.0);
+        }
+
+        if !(0.01..=CUTOFF).contains(&distance) {
             return Ok(0.0);
         }
 
@@ -155,7 +153,10 @@ impl ForceField for VinaForceField {
         atom2: &Atom,
         distance: f64,
     ) -> Result<f64, ForceFieldError> {
-        if !(0.01..=8.0).contains(&distance) {
+        if atom1.atom_type.is_hydrogen()
+            || atom2.atom_type.is_hydrogen()
+            || !(0.01..=CUTOFF).contains(&distance)
+        {
             return Ok(0.0);
         }
 
@@ -186,7 +187,10 @@ impl ForceField for VinaForceField {
         atom2: &Atom,
         distance: f64,
     ) -> Result<f64, ForceFieldError> {
-        if !(0.01..=8.0).contains(&distance) {
+        if atom1.atom_type.is_hydrogen()
+            || atom2.atom_type.is_hydrogen()
+            || !(0.01..=CUTOFF).contains(&distance)
+        {
             return Ok(0.0);
         }
 
@@ -200,7 +204,10 @@ impl ForceField for VinaForceField {
         atom2: &Atom,
         distance: f64,
     ) -> Result<f64, ForceFieldError> {
-        if !(0.01..=8.0).contains(&distance) {
+        if atom1.atom_type.is_hydrogen()
+            || atom2.atom_type.is_hydrogen()
+            || !(0.01..=CUTOFF).contains(&distance)
+        {
             return Ok(0.0);
         }
 
@@ -276,7 +283,7 @@ impl VinaForceField {
     #[inline]
     fn hydrophobic_term(&self, atom1: &Atom, atom2: &Atom, d: f64) -> f64 {
         // Both atoms must be hydrophobic
-        if !Self::is_hydrophobic(atom1.atom_type) || !Self::is_hydrophobic(atom2.atom_type) {
+        if !Self::is_hydrophobic(atom1) || !Self::is_hydrophobic(atom2) {
             return 0.0;
         }
 
@@ -299,9 +306,8 @@ impl VinaForceField {
     #[inline]
     fn hbond_term(&self, atom1: &Atom, atom2: &Atom, d: f64) -> f64 {
         // Check for donor-acceptor pair
-        let is_hbond_pair = (Self::is_hbond_donor(atom1.atom_type)
-            && Self::is_hbond_acceptor(atom2.atom_type))
-            || (Self::is_hbond_donor(atom2.atom_type) && Self::is_hbond_acceptor(atom1.atom_type));
+        let is_hbond_pair = (Self::is_hbond_donor(atom1) && Self::is_hbond_acceptor(atom2))
+            || (Self::is_hbond_donor(atom2) && Self::is_hbond_acceptor(atom1));
 
         if !is_hbond_pair {
             return 0.0;
@@ -322,6 +328,7 @@ impl VinaForceField {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atom::AtomType;
     use nalgebra::Vector3;
 
     fn create_test_atom(atom_type: AtomType, x: f64, y: f64, z: f64) -> Atom {
@@ -370,15 +377,78 @@ mod tests {
         assert!(energy < 0.0, "Hydrophobic should be attractive (negative)");
     }
 
+    /// A carbon bonded to a heteroatom is `C_P` in Vina's typing and is not
+    /// hydrophobic. Treating every carbon as hydrophobic was worth roughly
+    /// 4.5 kcal/mol of spurious attraction on the 1IEP benchmark.
+    #[test]
+    fn test_polar_carbon_is_not_hydrophobic() {
+        let ff = VinaForceField::new();
+        let c1 = create_test_atom(AtomType::Carbon, 0.0, 0.0, 0.0);
+        let mut c2 = create_test_atom(AtomType::Carbon, 4.0, 0.0, 0.0);
+        c2.is_hydrophobic = false; // as assign_xs_types would mark a C_P carbon
+
+        assert_eq!(
+            ff.hydrophobic_term(&c1, &c2, 0.3),
+            0.0,
+            "a C_P carbon must not contribute a hydrophobic term"
+        );
+    }
+
     #[test]
     fn test_hbond_term() {
         let ff = VinaForceField::new();
-        let donor = create_test_atom(AtomType::NitrogenH, 0.0, 0.0, 0.0);
-        let acceptor = create_test_atom(AtomType::Oxygen, 2.8, 0.0, 0.0);
+        let mut donor = create_test_atom(AtomType::NitrogenH, 0.0, 0.0, 0.0);
+        donor.is_hbond_donor = true; // carries a polar hydrogen
+        let acceptor = create_test_atom(AtomType::OxygenH, 2.8, 0.0, 0.0);
 
         // Should have H-bond interaction at appropriate distance
         let energy = ff.hbond_term(&donor, &acceptor, -0.5);
         assert!(energy < 0.0, "H-bond should be attractive (negative)");
+    }
+
+    /// An acceptor-flagged atom without a bonded polar hydrogen is not a donor.
+    /// Inferring donors from the `NA`/`OA`/`SA` labels alone fabricated an
+    /// H-bond network in structures prepared without polar hydrogens.
+    #[test]
+    fn test_acceptor_pair_without_donor_makes_no_hbond() {
+        let ff = VinaForceField::new();
+        let a1 = create_test_atom(AtomType::NitrogenH, 0.0, 0.0, 0.0);
+        let a2 = create_test_atom(AtomType::OxygenH, 2.8, 0.0, 0.0);
+
+        assert!(!a1.is_hbond_donor && !a2.is_hbond_donor);
+        assert_eq!(
+            ff.hbond_term(&a1, &a2, -0.5),
+            0.0,
+            "two acceptors with no donor must not form an H-bond"
+        );
+    }
+
+    /// Vina scores heavy atoms only.
+    #[test]
+    fn test_hydrogens_are_not_scored() {
+        let ff = VinaForceField::new();
+        let h = create_test_atom(AtomType::HydrogenD, 0.0, 0.0, 0.0);
+        let o = create_test_atom(AtomType::OxygenH, 2.0, 0.0, 0.0);
+
+        assert_eq!(ff.atom_pair_energy(&h, &o, 2.0).unwrap(), 0.0);
+    }
+
+    /// The cutoff is on the centre-to-centre distance, matching Vina, which
+    /// tabulates its potentials against `r` over `[0, 8]`. Cutting on the
+    /// surface distance instead pulls in far more long-range gauss2 pairs and
+    /// drove the 1IEP benchmark about 5 kcal/mol too negative.
+    #[test]
+    fn test_cutoff_is_centre_to_centre() {
+        let ff = VinaForceField::new();
+        let c1 = create_test_atom(AtomType::Carbon, 0.0, 0.0, 0.0);
+        let c2 = create_test_atom(AtomType::Carbon, 8.5, 0.0, 0.0);
+
+        assert_eq!(
+            ff.atom_pair_energy(&c1, &c2, 8.5).unwrap(),
+            0.0,
+            "pairs beyond 8 A centre-to-centre are not scored"
+        );
+        assert!(ff.atom_pair_energy(&c1, &c2, 7.5).unwrap() != 0.0);
     }
 
     #[test]

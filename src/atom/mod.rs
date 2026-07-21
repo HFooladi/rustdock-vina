@@ -97,6 +97,53 @@ impl AtomType {
         }
     }
 
+    /// Whether this element can be hydrophobic at all under Vina's `xs` typing.
+    ///
+    /// Carbon and the halogens qualify. Carbon additionally requires that it not
+    /// be bonded to a heteroatom (`C_H` vs `C_P`), which this type-only check
+    /// cannot see — see [`Atom::is_hydrophobic`].
+    pub fn is_potentially_hydrophobic(&self) -> bool {
+        matches!(
+            self,
+            AtomType::Carbon
+                | AtomType::Fluorine
+                | AtomType::Chlorine
+                | AtomType::Bromine
+                | AtomType::Iodine
+        )
+    }
+
+    /// Whether this element accepts hydrogen bonds.
+    ///
+    /// Vina treats only the acceptor-flagged PDBQT types (`NA`/`OA`/`SA`) as
+    /// acceptors. Plain `N`/`O`/`S` are non-polar in this sense and are
+    /// deliberately excluded.
+    pub fn is_hbond_acceptor(&self) -> bool {
+        matches!(
+            self,
+            AtomType::NitrogenH | AtomType::OxygenH | AtomType::SulfurH
+        )
+    }
+
+    /// Whether this is a hydrogen, which Vina's heavy-atom scoring ignores.
+    pub fn is_hydrogen(&self) -> bool {
+        matches!(self, AtomType::Hydrogen | AtomType::HydrogenD)
+    }
+
+    /// Whether this is a heteroatom for the purpose of the `C_H`/`C_P` split.
+    pub fn is_heteroatom(&self) -> bool {
+        matches!(
+            self,
+            AtomType::Nitrogen
+                | AtomType::NitrogenH
+                | AtomType::Oxygen
+                | AtomType::OxygenH
+                | AtomType::Sulfur
+                | AtomType::SulfurH
+                | AtomType::Phosphorus
+        )
+    }
+
     /// Convert atom type to PDBQT string
     pub fn to_pdbqt_string(&self) -> &'static str {
         match self {
@@ -154,6 +201,24 @@ pub struct Atom {
 
     /// Is this atom part of a flexible side chain?
     pub is_flexible: bool,
+
+    /// Whether this atom is hydrophobic under Vina's `xs` typing.
+    ///
+    /// Carbon and the halogens qualify, but carbon only when it is *not* bonded
+    /// to a heteroatom — Vina's `C_H` vs `C_P` distinction. That depends on the
+    /// bond graph rather than the atom type alone, so this is assigned by
+    /// [`Molecule::assign_xs_types`](crate::molecule::Molecule::assign_xs_types)
+    /// once connectivity is known. The value here is the type-only
+    /// approximation until then.
+    pub is_hydrophobic: bool,
+
+    /// Whether this atom donates a hydrogen bond, i.e. it is an N/O/S carrying
+    /// a bonded polar hydrogen.
+    ///
+    /// Also bond-graph dependent, and assigned by the same pass. A receptor
+    /// prepared without polar hydrogens therefore has no donors at all, which
+    /// is what Vina does too.
+    pub is_hbond_donor: bool,
 }
 
 impl Atom {
@@ -179,6 +244,8 @@ impl Atom {
             chain_id,
             charge,
             is_flexible: false,
+            is_hydrophobic: atom_type.is_potentially_hydrophobic(),
+            is_hbond_donor: false,
         }
     }
 

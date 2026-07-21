@@ -1,6 +1,7 @@
 //! Input/output functionality for molecular docking
 
 use nalgebra::Vector3;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -159,10 +160,14 @@ pub fn parse_pdbqt<P: AsRef<Path>>(path: P) -> Result<Molecule, IoError> {
         }
     }
 
-    // If no bonds were created, try to infer them based on distances
-    if molecule.bonds.is_empty() {
-        infer_bonds(&mut molecule);
-    }
+    // Always infer connectivity. BRANCH records only describe the rotatable
+    // bonds (6 for a typical drug-like ligand), which is nowhere near the full
+    // bond graph that atom typing needs.
+    infer_bonds(&mut molecule);
+
+    // Hydrophobicity and donor status depend on connectivity, so they can only
+    // be assigned once bonds exist.
+    molecule.assign_xs_types();
 
     Ok(molecule)
 }
@@ -261,27 +266,53 @@ fn parse_pdbqt_atom(line: &str, line_number: usize) -> Result<Atom, IoError> {
 
 /// Infer bonds based on distances between atoms
 fn infer_bonds(molecule: &mut Molecule) {
-    // Typical bond length threshold in Angstroms
-    const BOND_THRESHOLD: f64 = 2.0;
+    // Heavy-atom covalent bonds run to about 1.9 A (S-S is the long case at
+    // ~2.05); bonds to hydrogen are near 1.1. Using one flat threshold for both
+    // would pull in 1-3 neighbours, which sit around 2.4 A.
+    const HEAVY_BOND_MAX: f64 = 2.1;
+    const HYDROGEN_BOND_MAX: f64 = 1.3;
+
+    // Rotatable bonds come from the BRANCH records and are already present;
+    // record them so inference does not duplicate them.
+    let mut existing: HashSet<(usize, usize)> = molecule
+        .bonds
+        .iter()
+        .map(|b| ordered_pair(b.atom1_idx, b.atom2_idx))
+        .collect();
 
     for i in 0..molecule.atoms.len() {
         for j in (i + 1)..molecule.atoms.len() {
             let atom1 = &molecule.atoms[i];
             let atom2 = &molecule.atoms[j];
 
-            let distance = atom1.distance(atom2);
+            let involves_hydrogen = atom1.atom_type.is_hydrogen() || atom2.atom_type.is_hydrogen();
+            let threshold = if involves_hydrogen {
+                HYDROGEN_BOND_MAX
+            } else {
+                HEAVY_BOND_MAX
+            };
 
-            // If atoms are close enough, add a bond
-            if distance < BOND_THRESHOLD {
-                // Determine if the bond is rotatable
-                // This is a simplification - in reality, this would be more complex
-                let rotatable =
-                    !matches!(atom1.atom_type, AtomType::Hydrogen | AtomType::HydrogenD)
-                        && !matches!(atom2.atom_type, AtomType::Hydrogen | AtomType::HydrogenD);
-
-                let _ = molecule.add_bond(i, j, rotatable);
+            if atom1.distance(atom2) >= threshold {
+                continue;
             }
+            if !existing.insert(ordered_pair(i, j)) {
+                continue;
+            }
+
+            // Inferred bonds describe connectivity only. Rotatability is a
+            // property of the torsion tree, which the BRANCH records define;
+            // guessing it from distance alone would mark nearly every bond
+            // rotatable.
+            let _ = molecule.add_bond(i, j, false);
         }
+    }
+}
+
+fn ordered_pair(i: usize, j: usize) -> (usize, usize) {
+    if i <= j {
+        (i, j)
+    } else {
+        (j, i)
     }
 }
 
