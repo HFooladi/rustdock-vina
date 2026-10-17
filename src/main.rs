@@ -6,7 +6,8 @@ use log::{error, info, warn};
 use nalgebra::Vector3;
 use rustdock_vina::forcefield::{ad4::AD4ForceField, vina::VinaForceField, ForceField};
 use rustdock_vina::io::{parse_pdbqt, write_docking_results};
-use rustdock_vina::optimization::{monte_carlo::MonteCarlo, Optimizer};
+use rustdock_vina::optimization::monte_carlo::{MonteCarlo, MonteCarloParams};
+use rustdock_vina::optimization::Optimizer;
 use std::path::PathBuf;
 
 /// Command-line arguments for the application
@@ -72,6 +73,14 @@ enum Commands {
         /// Energy range for output poses (kcal/mol)
         #[clap(long, default_value_t = 3.0)]
         energy_range: f64,
+
+        /// Spacing of the precomputed affinity grids (Angstroms)
+        #[clap(long, default_value_t = 0.375)]
+        grid_spacing: f64,
+
+        /// Search on exact pairwise energies instead of precomputed grids (slow)
+        #[clap(long)]
+        no_grid: bool,
     },
 
     /// Score an existing pose
@@ -119,6 +128,8 @@ fn main() -> Result<()> {
             out,
             dir,
             energy_range,
+            grid_spacing,
+            no_grid,
         } => {
             // Determine scoring function
             let forcefield = select_forcefield(&scoring)?;
@@ -192,7 +203,16 @@ fn main() -> Result<()> {
             };
 
             // Create optimizer
-            let optimizer = MonteCarlo::default();
+            if !no_grid && !(grid_spacing.is_finite() && grid_spacing > 0.0) {
+                return Err(anyhow::anyhow!(
+                    "--grid-spacing must be a positive number, got {grid_spacing}"
+                ));
+            }
+            let optimizer = MonteCarlo::with_params(MonteCarloParams {
+                use_grid: !no_grid,
+                grid_spacing,
+                ..MonteCarloParams::default()
+            });
 
             // Process each ligand
             for ligand_path in ligand {

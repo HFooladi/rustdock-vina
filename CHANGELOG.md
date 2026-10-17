@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- The docking search now scores ligand-receptor energy from precomputed
+  per-atom-class affinity grids (`GridSet`), as Vina does, instead of summing
+  over receptor atoms for every pose. The final polish of each run and all
+  reported energies still use exact pairwise scoring. On the 1IEP redocking
+  benchmark a run is ~6x cheaper, and at equal wall-clock the extra runs raise
+  top-pose recovery (< 2 A) from 2/16 to 7/16 seeds. New `dock` flags:
+  `--grid-spacing` (default 0.375 A) and `--no-grid`. Force fields opt in via
+  `ForceField::grid_cutoff`; AD4 (charge-dependent) stays pairwise.
+
 ### Fixed
 - Vina `xs` atom typing is now derived from the bond graph: carbons bonded to a
   heteroatom are `C_P` and not hydrophobic, and hydrogen-bond donors require an

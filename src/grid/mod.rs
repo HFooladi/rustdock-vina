@@ -1,7 +1,10 @@
 //! Grid representation for efficient force field evaluation
 
-use crate::atom::AtomType;
+use crate::atom::{Atom, AtomType};
+use crate::forcefield::{ForceField, ForceFieldError};
+use crate::molecule::Molecule;
 use nalgebra::Vector3;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
@@ -182,5 +185,335 @@ impl Grid {
         // This would normally save to AutoDock map format
         // For now, return an error as this is not implemented
         Err(GridError::ParseError("Not implemented".to_string()))
+    }
+}
+
+/// What a ligand atom looks like to a type-gridable force field: its type
+/// plus the bond-graph-derived `xs` flags. Two atoms with the same key score
+/// identically against any receptor atom at any distance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ProbeKey {
+    atom_type: AtomType,
+    is_hydrophobic: bool,
+    is_hbond_donor: bool,
+}
+
+impl ProbeKey {
+    fn of(atom: &Atom) -> Self {
+        Self {
+            atom_type: atom.atom_type,
+            is_hydrophobic: atom.is_hydrophobic,
+            is_hbond_donor: atom.is_hbond_donor,
+        }
+    }
+}
+
+/// Precomputed ligand-receptor interaction grids, one per ligand atom class.
+///
+/// This is how Vina makes the search affordable: each grid point holds the
+/// summed pair energy of a probe atom against every receptor atom in range,
+/// so scoring a pose costs one interpolation per ligand atom instead of a sum
+/// over every receptor atom.
+///
+/// Atoms that wander outside the gridded region are scored exactly against
+/// the stored receptor atoms, so leaving the grid costs speed, not accuracy.
+#[derive(Debug, Clone)]
+pub struct GridSet {
+    grids: Vec<Grid>,
+    /// Grid index for each ligand atom; `None` for atoms that never interact
+    /// (hydrogens).
+    atom_grid: Vec<Option<usize>>,
+    /// Receptor heavy atoms, kept for scoring atoms outside the grid.
+    receptor: Vec<Atom>,
+}
+
+impl GridSet {
+    /// Build grids covering the search box widened by `margin` on every side.
+    ///
+    /// Grids are built only for the atom classes present in `ligand`, and the
+    /// set is tied to that ligand's atom order. Returns `Ok(None)` when the
+    /// force field's pair energy cannot be gridded
+    /// (see [`ForceField::grid_cutoff`]).
+    pub fn build(
+        ligand: &Molecule,
+        receptor: &Molecule,
+        forcefield: &dyn ForceField,
+        center: &Vector3<f64>,
+        box_size: &Vector3<f64>,
+        margin: f64,
+        spacing: f64,
+    ) -> Result<Option<Self>, GridError> {
+        let Some(cutoff) = forcefield.grid_cutoff() else {
+            return Ok(None);
+        };
+        if !spacing.is_finite() || spacing <= 0.0 {
+            return Err(GridError::InvalidDimension(format!(
+                "grid spacing must be positive, got {spacing}"
+            )));
+        }
+
+        let half = box_size * 0.5 + Vector3::repeat(margin);
+        let origin = center - half;
+        let dimensions = (half * 2.0).map(|extent| (extent / spacing).ceil() as usize + 1);
+
+        let mut probes: Vec<Atom> = Vec::new();
+        let mut keys: Vec<ProbeKey> = Vec::new();
+        let atom_grid = ligand
+            .atoms
+            .iter()
+            .map(|atom| {
+                if atom.atom_type.is_hydrogen() {
+                    return None;
+                }
+                let key = ProbeKey::of(atom);
+                Some(keys.iter().position(|k| *k == key).unwrap_or_else(|| {
+                    keys.push(key);
+                    probes.push(atom.clone());
+                    keys.len() - 1
+                }))
+            })
+            .collect();
+
+        let receptor: Vec<Atom> = receptor
+            .atoms
+            .iter()
+            .filter(|a| !a.atom_type.is_hydrogen())
+            .cloned()
+            .collect();
+
+        let grids = probes
+            .iter()
+            .map(|probe| {
+                let mut grid = Grid::new(origin, spacing, dimensions, probe.atom_type)?;
+                fill_grid(&mut grid, probe, &receptor, forcefield, cutoff)?;
+                Ok(grid)
+            })
+            .collect::<Result<Vec<_>, GridError>>()?;
+
+        Ok(Some(Self {
+            grids,
+            atom_grid,
+            receptor,
+        }))
+    }
+
+    /// Number of grids, i.e. distinct interacting atom classes in the ligand.
+    pub fn len(&self) -> usize {
+        self.grids.len()
+    }
+
+    /// Whether the set holds no grids (a ligand with no heavy atoms).
+    pub fn is_empty(&self) -> bool {
+        self.grids.is_empty()
+    }
+
+    /// Ligand-receptor interaction energy of `ligand`, which must have the
+    /// same atoms in the same order as the ligand the set was built for.
+    pub fn energy(
+        &self,
+        ligand: &Molecule,
+        forcefield: &dyn ForceField,
+    ) -> Result<f64, ForceFieldError> {
+        let mut total = 0.0;
+        for (atom, grid) in ligand.atoms.iter().zip(&self.atom_grid) {
+            let Some(g) = grid else { continue };
+            total += match self.grids[*g].get_value(&atom.coordinates) {
+                Ok(value) => value,
+                Err(_) => pairwise_energy(atom, &self.receptor, forcefield)?,
+            };
+        }
+        Ok(total)
+    }
+}
+
+/// Exact energy of one atom against a list of receptor atoms.
+fn pairwise_energy(
+    atom: &Atom,
+    receptor: &[Atom],
+    forcefield: &dyn ForceField,
+) -> Result<f64, ForceFieldError> {
+    let mut total = 0.0;
+    for rec_atom in receptor {
+        let distance = atom.distance(rec_atom);
+        if distance > 0.01 {
+            total += forcefield.atom_pair_energy(atom, rec_atom, distance)?;
+        }
+    }
+    Ok(total)
+}
+
+/// Fill every point of `grid` with the energy of `probe` placed there.
+///
+/// Parallel over x-slabs. Each slab, then each row, narrows the receptor list
+/// to atoms within `cutoff` along that axis, so the innermost loop only sees
+/// a thin tube of candidates rather than the whole receptor.
+fn fill_grid(
+    grid: &mut Grid,
+    probe: &Atom,
+    receptor: &[Atom],
+    forcefield: &dyn ForceField,
+    cutoff: f64,
+) -> Result<(), GridError> {
+    let (ny, nz) = (grid.dimensions.y, grid.dimensions.z);
+    let (origin, spacing) = (grid.origin, grid.spacing);
+
+    grid.data
+        .par_chunks_mut(ny * nz)
+        .enumerate()
+        .try_for_each(|(ix, slab)| {
+            let x = origin.x + ix as f64 * spacing;
+            let near_x: Vec<&Atom> = receptor
+                .iter()
+                .filter(|a| (a.coordinates.x - x).abs() <= cutoff)
+                .collect();
+            let mut probe = probe.clone();
+
+            for (iy, row) in slab.chunks_mut(nz).enumerate() {
+                let y = origin.y + iy as f64 * spacing;
+                let near_xy: Vec<&Atom> = near_x
+                    .iter()
+                    .copied()
+                    .filter(|a| (a.coordinates.y - y).abs() <= cutoff)
+                    .collect();
+
+                for (iz, value) in row.iter_mut().enumerate() {
+                    probe.coordinates = Vector3::new(x, y, origin.z + iz as f64 * spacing);
+                    let mut total = 0.0;
+                    for rec_atom in &near_xy {
+                        let distance = probe.distance(rec_atom);
+                        if distance > 0.01 && distance <= cutoff {
+                            total += forcefield.atom_pair_energy(&probe, rec_atom, distance)?;
+                        }
+                    }
+                    *value = total;
+                }
+            }
+            Ok::<(), ForceFieldError>(())
+        })
+        .map_err(|e| GridError::ParseError(format!("grid energy evaluation failed: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::forcefield::{ad4::AD4ForceField, vina::VinaForceField};
+
+    fn atom(atom_type: AtomType, x: f64, y: f64, z: f64) -> Atom {
+        Atom::new(
+            atom_type,
+            Vector3::new(x, y, z),
+            "TEST".to_string(),
+            1,
+            "TST".to_string(),
+            1,
+            'A',
+            0.0,
+        )
+    }
+
+    fn receptor() -> Molecule {
+        let mut m = Molecule::new("rec");
+        m.add_atom(atom(AtomType::Carbon, 0.0, 0.0, 0.0));
+        m.add_atom(atom(AtomType::OxygenH, 3.0, 1.0, -1.0));
+        m.add_atom(atom(AtomType::NitrogenH, -2.0, 2.5, 1.5));
+        m
+    }
+
+    fn ligand_at(positions: &[Vector3<f64>]) -> Molecule {
+        let mut m = Molecule::new("lig");
+        for (i, p) in positions.iter().enumerate() {
+            let t = if i % 2 == 0 {
+                AtomType::Carbon
+            } else {
+                AtomType::OxygenH
+            };
+            m.add_atom(atom(t, p.x, p.y, p.z));
+        }
+        m
+    }
+
+    fn exact(ligand: &Molecule, receptor: &Molecule, ff: &dyn ForceField) -> f64 {
+        ligand
+            .atoms
+            .iter()
+            .map(|a| pairwise_energy(a, &receptor.atoms, ff).unwrap())
+            .sum()
+    }
+
+    fn build(ligand: &Molecule, spacing: f64) -> GridSet {
+        GridSet::build(
+            ligand,
+            &receptor(),
+            &VinaForceField::default(),
+            &Vector3::zeros(),
+            &Vector3::repeat(12.0),
+            0.0,
+            spacing,
+        )
+        .unwrap()
+        .expect("Vina is gridable")
+    }
+
+    #[test]
+    fn test_grid_matches_pairwise_on_grid_points() {
+        // Box [-6, 6] with spacing 0.5 puts points on every half-angstrom.
+        let ligand = ligand_at(&[Vector3::new(4.0, 0.5, 0.0), Vector3::new(1.5, 3.0, -2.0)]);
+        let grids = build(&ligand, 0.5);
+        let ff = VinaForceField::default();
+
+        let grid_energy = grids.energy(&ligand, &ff).unwrap();
+        assert!((grid_energy - exact(&ligand, &receptor(), &ff)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_grid_interpolation_is_close_off_grid() {
+        let ligand = ligand_at(&[Vector3::new(4.1, 0.7, 0.3), Vector3::new(1.37, 3.21, -2.11)]);
+        let grids = build(&ligand, 0.375);
+        let ff = VinaForceField::default();
+
+        let grid_energy = grids.energy(&ligand, &ff).unwrap();
+        let exact_energy = exact(&ligand, &receptor(), &ff);
+        assert!(
+            (grid_energy - exact_energy).abs() < 0.01,
+            "grid {grid_energy} vs exact {exact_energy}"
+        );
+    }
+
+    #[test]
+    fn test_atoms_outside_grid_are_scored_exactly() {
+        // 7.5 is outside the [-6, 6] box but within the 8 A cutoff of the
+        // receptor oxygen, so a silent zero would be wrong.
+        let ligand = ligand_at(&[Vector3::new(7.5, 0.0, 0.0), Vector3::new(1.5, 3.0, -2.0)]);
+        let grids = build(&ligand, 0.5);
+        let ff = VinaForceField::default();
+
+        let grid_energy = grids.energy(&ligand, &ff).unwrap();
+        assert!((grid_energy - exact(&ligand, &receptor(), &ff)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_one_grid_per_atom_class() {
+        let ligand = ligand_at(&[
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(2.0, 0.0, 0.0),
+            Vector3::new(3.0, 0.0, 0.0),
+        ]);
+        assert_eq!(build(&ligand, 1.0).len(), 2);
+    }
+
+    #[test]
+    fn test_charge_dependent_forcefield_is_not_gridded() {
+        let ligand = ligand_at(&[Vector3::new(1.0, 0.0, 0.0)]);
+        let grids = GridSet::build(
+            &ligand,
+            &receptor(),
+            &AD4ForceField::default(),
+            &Vector3::zeros(),
+            &Vector3::repeat(12.0),
+            0.0,
+            0.5,
+        )
+        .unwrap();
+        assert!(grids.is_none());
     }
 }
