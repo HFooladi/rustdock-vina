@@ -3,6 +3,7 @@
 use nalgebra::Vector3;
 use rustdock_vina::forcefield::vina::VinaForceField;
 use rustdock_vina::forcefield::ForceField;
+use rustdock_vina::grid::GridSet;
 use rustdock_vina::io::{parse_pdbqt, write_docking_results};
 use rustdock_vina::optimization::monte_carlo::{MonteCarlo, MonteCarloParams};
 use rustdock_vina::optimization::Optimizer;
@@ -433,5 +434,54 @@ fn test_no_donors_without_polar_hydrogens() {
     assert!(
         !receptor.atoms.iter().any(|a| a.is_hbond_donor),
         "no atom can donate a hydrogen bond without a bonded polar hydrogen"
+    );
+}
+
+/// Searching on grids must see nearly the same energy landscape as exact
+/// scoring.
+///
+/// At Vina's 0.375 A spacing the 1IEP crystal pose comes out about 1.2
+/// kcal/mol less favourable on the grid than pairwise: trilinear
+/// interpolation undersamples gauss1's 0.5 A-wide well in tight contacts. The
+/// gap shrinks with spacing (0.34 at 0.2 A, 0.03 at 0.05 A), so it is
+/// discretization, not a typing mismatch, and the search's final polish and
+/// all reported energies use exact scoring. A gap well beyond this would mean
+/// the grid scores a different function.
+#[test]
+fn test_1iep_grid_energy_matches_pairwise() {
+    let receptor =
+        parse_pdbqt(benchmark_data_dir().join("receptor.pdbqt")).expect("parse receptor");
+    let ligand = parse_pdbqt(benchmark_data_dir().join("ligand.pdbqt")).expect("parse ligand");
+    let forcefield = VinaForceField::default();
+
+    let (lo, hi) = ligand.bounding_box().unwrap();
+    let center = (lo + hi) * 0.5;
+    let box_size = hi - lo + Vector3::repeat(2.0);
+    let grids = GridSet::build(
+        &ligand,
+        &receptor,
+        &forcefield,
+        &center,
+        &box_size,
+        0.0,
+        0.375,
+    )
+    .unwrap()
+    .expect("Vina is gridable");
+
+    let mut pairwise = 0.0;
+    for lig_atom in &ligand.atoms {
+        for rec_atom in &receptor.atoms {
+            let d = lig_atom.distance(rec_atom);
+            if d > 0.01 {
+                pairwise += forcefield.atom_pair_energy(lig_atom, rec_atom, d).unwrap();
+            }
+        }
+    }
+    let gridded = grids.energy(&ligand, &forcefield).unwrap();
+
+    assert!(
+        (gridded - pairwise).abs() < 1.5,
+        "grid energy {gridded:.3} vs pairwise {pairwise:.3}"
     );
 }

@@ -7,6 +7,7 @@ use rayon::prelude::*;
 use std::f64::consts::PI;
 
 use crate::forcefield::ForceField;
+use crate::grid::GridSet;
 use crate::molecule::Molecule;
 use crate::optimization::local::{LocalOptimizer, LocalOptimizerParams};
 use crate::optimization::{DockingResult, OptimizationError, Optimizer};
@@ -63,6 +64,17 @@ pub struct MonteCarloParams {
     /// per-pose seed from the master seed so the parallel pose set is also
     /// reproducible.
     pub seed: Option<u64>,
+
+    /// Score ligand-receptor energy from precomputed grids during the search.
+    ///
+    /// Each pose then costs one interpolation per ligand atom instead of a sum
+    /// over every nearby receptor atom. Reported energies are always rescored
+    /// exactly. Ignored for force fields that cannot be gridded
+    /// (see [`ForceField::grid_cutoff`]).
+    pub use_grid: bool,
+
+    /// Grid point spacing in Angstroms (Vina's default is 0.375).
+    pub grid_spacing: f64,
 }
 
 impl Default for MonteCarloParams {
@@ -80,6 +92,8 @@ impl Default for MonteCarloParams {
             randomize_initial_pose: true,
             refine_iterations: 12,
             seed: None,
+            use_grid: true,
+            grid_spacing: 0.375,
         }
     }
 }
@@ -159,12 +173,213 @@ impl MonteCarlo {
     fn objective(
         &self,
         ligand: &Molecule,
-        receptor: &Molecule,
+        inter: InterModel,
         forcefield: &dyn ForceField,
         intra_pairs: &[(usize, usize)],
     ) -> Result<f64, OptimizationError> {
-        Ok(intermolecular_energy(ligand, receptor, forcefield)?
+        Ok(inter.energy(ligand, forcefield)?
             + intramolecular_energy(ligand, intra_pairs, forcefield)?)
+    }
+
+    /// Build the search grids for this ligand and box, if enabled and the
+    /// force field allows it.
+    ///
+    /// The grid spans the box widened by the ligand's radius, the furthest an
+    /// atom can sit from a centroid confined to the box (barring torsional
+    /// extension, which the exact fallback in [`GridSet`] covers).
+    fn build_grids(
+        &self,
+        ligand: &Molecule,
+        receptor: &Molecule,
+        forcefield: &dyn ForceField,
+        center: &Vector3<f64>,
+        box_size: &Vector3<f64>,
+    ) -> Result<Option<GridSet>, OptimizationError> {
+        if !self.params.use_grid {
+            return Ok(None);
+        }
+        Ok(GridSet::build(
+            ligand,
+            receptor,
+            forcefield,
+            center,
+            box_size,
+            ligand_radius(ligand),
+            self.params.grid_spacing,
+        )?)
+    }
+
+    /// One Monte Carlo run, searching on `grids` when given and on exact
+    /// pairwise energy otherwise.
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        &self,
+        ligand: &Molecule,
+        receptor: &Molecule,
+        grids: Option<&GridSet>,
+        forcefield: &dyn ForceField,
+        center: Vector3<f64>,
+        box_size: Vector3<f64>,
+        max_steps: usize,
+    ) -> Result<DockingResult, OptimizationError> {
+        let inter = InterModel { receptor, grids };
+        let mut rng = match self.params.seed {
+            Some(s) => StdRng::seed_from_u64(s),
+            None => StdRng::from_entropy(),
+        };
+        // Start each run from a random placement inside the box rather than
+        // from the input coordinates. Without this every replica explores the
+        // same basin, "exhaustiveness" buys almost nothing, and a ligand handed
+        // in at its answer is simply handed back.
+        let mut current_molecule = if self.params.randomize_initial_pose {
+            self.random_pose_in_box(ligand, &center, &box_size, &mut rng)
+        } else {
+            ligand.clone()
+        };
+
+        // Topology-derived, so computed once and reused for every evaluation.
+        let intra_pairs = ligand.intramolecular_pairs();
+
+        // Calculate initial energy
+        let mut current_energy =
+            self.objective(&current_molecule, inter, forcefield, &intra_pairs)?;
+        let mut best_energy = current_energy;
+        let mut best_molecule = current_molecule.clone();
+
+        let mut steps_since_improvement = 0;
+
+        // Vina's basin-hopping: perturb, minimize, then apply the Metropolis
+        // test to the *minimized* energy. Testing the raw perturbed energy
+        // instead makes the walk hop between unrelaxed configurations and
+        // wastes most proposals, because almost any random nudge raises the
+        // energy before relaxation has a chance to recover it.
+        let refiner = LocalOptimizer::with_params(LocalOptimizerParams {
+            max_iterations: self.params.refine_iterations,
+            ..LocalOptimizerParams::default()
+        });
+        let bounds = Some((&center, &box_size));
+
+        for _step in 0..max_steps {
+            // Create a copy of the current state
+            let mut new_molecule = current_molecule.clone();
+
+            // Perturb every degree of freedom at once, as Vina does, rather
+            // than picking a single one per step.
+            new_molecule.translate(&self.random_translation(&mut rng));
+            new_molecule.rotate_about_center(&self.random_rotation(&mut rng));
+            for i in 0..new_molecule.torsions.len() {
+                let delta = (rng.gen::<f64>() - 0.5) * 2.0 * self.params.max_torsion;
+                let _ = new_molecule.rotate_torsion(i, delta);
+            }
+
+            // Check if the molecule is still within the search box
+            if !new_molecule.center_within_box(&center, &box_size) {
+                continue;
+            }
+
+            let new_energy = if self.params.use_local_optimization {
+                refiner
+                    .minimize_with_model(&mut new_molecule, inter, forcefield, bounds, &intra_pairs)
+                    .unwrap_or(f64::INFINITY)
+            } else {
+                self.objective(&new_molecule, inter, forcefield, &intra_pairs)?
+            };
+
+            // Decide whether to accept the move (Metropolis criterion)
+            let accept = if new_energy <= current_energy {
+                true
+            } else {
+                let boltzmann_factor =
+                    ((current_energy - new_energy) / self.params.temperature).exp();
+                rng.gen::<f64>() < boltzmann_factor
+            };
+
+            if accept {
+                current_molecule = new_molecule;
+                current_energy = new_energy;
+
+                // Check if this is a new best solution
+                if new_energy < best_energy {
+                    best_energy = new_energy;
+                    best_molecule = current_molecule.clone();
+                    steps_since_improvement = 0;
+                } else {
+                    steps_since_improvement += 1;
+                }
+            } else {
+                steps_since_improvement += 1;
+            }
+
+            // Check termination criteria
+            if steps_since_improvement >= self.params.steps_without_improvement {
+                break;
+            }
+        }
+
+        // Polish the winner with a full-length minimization; the in-loop one is
+        // deliberately truncated for speed. Like Vina's final refinement, this
+        // runs on exact energies: grid interpolation undersamples the narrow
+        // attractive wells, which matters most in exactly the tight contacts a
+        // good pose has.
+        if self.params.use_local_optimization {
+            let local_optimizer = LocalOptimizer::new();
+            // Only the pose is kept; its energies are rescored exactly below.
+            let _ = local_optimizer.minimize_with_model(
+                &mut best_molecule,
+                InterModel::exact(receptor),
+                forcefield,
+                bounds,
+                &intra_pairs,
+            );
+        }
+
+        // The search minimizes inter + intra, but Vina reports the affinity
+        // from the intermolecular term alone: the ligand's internal energy
+        // cancels against the unbound reference state. Rescore exactly so
+        // grid interpolation error never reaches the reported numbers.
+        let inter_energy = intermolecular_energy(&best_molecule, receptor, forcefield)?;
+        let intra_energy = intramolecular_energy(&best_molecule, &intra_pairs, forcefield)?;
+
+        let energy_components = vec![
+            ("Intermolecular".to_string(), inter_energy),
+            ("Intramolecular".to_string(), intra_energy),
+        ];
+
+        Ok(DockingResult {
+            energy: inter_energy,
+            molecule: best_molecule,
+            energy_components,
+            rmsd: None,
+        })
+    }
+}
+
+/// How the search evaluates ligand-receptor energy: from precomputed grids
+/// when available, otherwise by exact pairwise summation.
+#[derive(Clone, Copy)]
+pub(crate) struct InterModel<'a> {
+    receptor: &'a Molecule,
+    grids: Option<&'a GridSet>,
+}
+
+impl<'a> InterModel<'a> {
+    /// Exact pairwise scoring against `receptor`.
+    pub(crate) fn exact(receptor: &'a Molecule) -> Self {
+        Self {
+            receptor,
+            grids: None,
+        }
+    }
+
+    pub(crate) fn energy(
+        &self,
+        ligand: &Molecule,
+        forcefield: &dyn ForceField,
+    ) -> Result<f64, OptimizationError> {
+        match self.grids {
+            Some(grids) => Ok(grids.energy(ligand, forcefield)?),
+            None => intermolecular_energy(ligand, self.receptor, forcefield),
+        }
     }
 }
 
@@ -219,137 +434,16 @@ impl Optimizer for MonteCarlo {
         box_size: Vector3<f64>,
         max_steps: usize,
     ) -> Result<DockingResult, OptimizationError> {
-        let mut rng = match self.params.seed {
-            Some(s) => StdRng::seed_from_u64(s),
-            None => StdRng::from_entropy(),
-        };
-        // Start each run from a random placement inside the box rather than
-        // from the input coordinates. Without this every replica explores the
-        // same basin, "exhaustiveness" buys almost nothing, and a ligand handed
-        // in at its answer is simply handed back.
-        let mut current_molecule = if self.params.randomize_initial_pose {
-            self.random_pose_in_box(ligand, &center, &box_size, &mut rng)
-        } else {
-            ligand.clone()
-        };
-
-        // Topology-derived, so computed once and reused for every evaluation.
-        let intra_pairs = ligand.intramolecular_pairs();
-
-        // Calculate initial energy
-        let mut current_energy =
-            self.objective(&current_molecule, receptor, forcefield, &intra_pairs)?;
-        let mut best_energy = current_energy;
-        let mut best_molecule = current_molecule.clone();
-
-        let mut steps_since_improvement = 0;
-
-        // Vina's basin-hopping: perturb, minimize, then apply the Metropolis
-        // test to the *minimized* energy. Testing the raw perturbed energy
-        // instead makes the walk hop between unrelaxed configurations and
-        // wastes most proposals, because almost any random nudge raises the
-        // energy before relaxation has a chance to recover it.
-        let refiner = LocalOptimizer::with_params(LocalOptimizerParams {
-            max_iterations: self.params.refine_iterations,
-            ..LocalOptimizerParams::default()
-        });
-        let bounds = Some((&center, &box_size));
-
-        for _step in 0..max_steps {
-            // Create a copy of the current state
-            let mut new_molecule = current_molecule.clone();
-
-            // Perturb every degree of freedom at once, as Vina does, rather
-            // than picking a single one per step.
-            new_molecule.translate(&self.random_translation(&mut rng));
-            new_molecule.rotate_about_center(&self.random_rotation(&mut rng));
-            for i in 0..new_molecule.torsions.len() {
-                let delta = (rng.gen::<f64>() - 0.5) * 2.0 * self.params.max_torsion;
-                let _ = new_molecule.rotate_torsion(i, delta);
-            }
-
-            // Check if the molecule is still within the search box
-            if !new_molecule.center_within_box(&center, &box_size) {
-                continue;
-            }
-
-            let new_energy = if self.params.use_local_optimization {
-                refiner
-                    .minimize_in_box_with_intra(
-                        &mut new_molecule,
-                        receptor,
-                        forcefield,
-                        bounds,
-                        &intra_pairs,
-                    )
-                    .unwrap_or(f64::INFINITY)
-            } else {
-                self.objective(&new_molecule, receptor, forcefield, &intra_pairs)?
-            };
-
-            // Decide whether to accept the move (Metropolis criterion)
-            let accept = if new_energy <= current_energy {
-                true
-            } else {
-                let boltzmann_factor =
-                    ((current_energy - new_energy) / self.params.temperature).exp();
-                rng.gen::<f64>() < boltzmann_factor
-            };
-
-            if accept {
-                current_molecule = new_molecule;
-                current_energy = new_energy;
-
-                // Check if this is a new best solution
-                if new_energy < best_energy {
-                    best_energy = new_energy;
-                    best_molecule = current_molecule.clone();
-                    steps_since_improvement = 0;
-                } else {
-                    steps_since_improvement += 1;
-                }
-            } else {
-                steps_since_improvement += 1;
-            }
-
-            // Check termination criteria
-            if steps_since_improvement >= self.params.steps_without_improvement {
-                break;
-            }
-        }
-
-        // Polish the winner with a full-length minimization; the in-loop one is
-        // deliberately truncated for speed.
-        if self.params.use_local_optimization {
-            let local_optimizer = LocalOptimizer::new();
-            if let Ok(optimized_energy) = local_optimizer.minimize_in_box_with_intra(
-                &mut best_molecule,
-                receptor,
-                forcefield,
-                bounds,
-                &intra_pairs,
-            ) {
-                best_energy = optimized_energy;
-            }
-        }
-
-        // The search minimizes inter + intra, but Vina reports the affinity
-        // from the intermolecular term alone: the ligand's internal energy
-        // cancels against the unbound reference state.
-        let inter = intermolecular_energy(&best_molecule, receptor, forcefield)?;
-        let intra = best_energy - inter;
-
-        let energy_components = vec![
-            ("Intermolecular".to_string(), inter),
-            ("Intramolecular".to_string(), intra),
-        ];
-
-        Ok(DockingResult {
-            energy: inter,
-            molecule: best_molecule,
-            energy_components,
-            rmsd: None,
-        })
+        let grids = self.build_grids(ligand, receptor, forcefield, &center, &box_size)?;
+        self.run(
+            ligand,
+            receptor,
+            grids.as_ref(),
+            forcefield,
+            center,
+            box_size,
+            max_steps,
+        )
     }
 
     fn generate_poses(
@@ -367,6 +461,9 @@ impl Optimizer for MonteCarlo {
         // the millions of energy evaluations to come.
         let pruned = prune_receptor(receptor, &center, &box_size, ligand);
 
+        // One set of grids serves every run.
+        let grids = self.build_grids(ligand, &pruned, forcefield, &center, &box_size)?;
+
         // Generate poses in parallel using rayon. If a master seed is set, derive
         // a distinct per-pose seed so the parallel pose set stays reproducible
         // (each worker still gets an uncorrelated stream because StdRng's
@@ -379,7 +476,15 @@ impl Optimizer for MonteCarlo {
                     seed: master_seed.map(|s| s.wrapping_add(i as u64)),
                     ..self.params.clone()
                 });
-                per_pose.optimize(ligand, &pruned, forcefield, center, box_size, max_steps)
+                per_pose.run(
+                    ligand,
+                    &pruned,
+                    grids.as_ref(),
+                    forcefield,
+                    center,
+                    box_size,
+                    max_steps,
+                )
             })
             .collect();
 
@@ -427,27 +532,16 @@ const MODE_RMSD_THRESHOLD: f64 = 1.0;
 ///
 /// A pose's centroid is confined to the box, so no ligand atom can be further
 /// than (half-box + ligand radius) from the box centre; adding the interaction
-/// cutoff gives a conservative bound. This is a cheap stand-in for the
-/// precomputed affinity grid a mature implementation would use.
+/// cutoff gives a conservative bound. Grids built from the
+/// pruned receptor are unaffected, since pruned atoms never reach the grid.
 fn prune_receptor(
     receptor: &Molecule,
     center: &Vector3<f64>,
     box_size: &Vector3<f64>,
     ligand: &Molecule,
 ) -> Molecule {
-    let ligand_radius = ligand
-        .center()
-        .map(|c| {
-            ligand
-                .atoms
-                .iter()
-                .map(|a| (a.coordinates - c).norm())
-                .fold(0.0, f64::max)
-        })
-        .unwrap_or(0.0);
-
     let half = box_size * 0.5;
-    let margin = ligand_radius + crate::forcefield::vina::CUTOFF;
+    let margin = ligand_radius(ligand) + crate::forcefield::vina::CUTOFF;
 
     let mut pruned = receptor.clone();
     pruned.atoms.retain(|atom| {
@@ -462,6 +556,20 @@ fn prune_receptor(
     pruned.bonds.clear();
     pruned.torsions.clear();
     pruned
+}
+
+/// Distance from the ligand's centroid to its furthest atom.
+fn ligand_radius(ligand: &Molecule) -> f64 {
+    ligand
+        .center()
+        .map(|c| {
+            ligand
+                .atoms
+                .iter()
+                .map(|a| (a.coordinates - c).norm())
+                .fold(0.0, f64::max)
+        })
+        .unwrap_or(0.0)
 }
 
 /// Sample a rotation axis uniformly over the sphere.

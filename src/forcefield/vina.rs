@@ -244,6 +244,12 @@ impl ForceField for VinaForceField {
     ) -> f64 {
         self.calculate_affinity(intermolecular_energy, num_rotatable_bonds)
     }
+
+    /// Vina's terms are functions of `xs` type and distance only, which is
+    /// what lets Vina itself score from precomputed grids.
+    fn grid_cutoff(&self) -> Option<f64> {
+        Some(CUTOFF)
+    }
 }
 
 // Private implementation of individual scoring terms

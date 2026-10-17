@@ -6,7 +6,7 @@ use nalgebra::{DVector, Unit, UnitQuaternion, Vector3};
 
 use crate::forcefield::ForceField;
 use crate::molecule::Molecule;
-use crate::optimization::monte_carlo::{intermolecular_energy, intramolecular_energy};
+use crate::optimization::monte_carlo::{intramolecular_energy, InterModel};
 use crate::optimization::OptimizationError;
 
 /// Parameters for local optimization
@@ -116,11 +116,25 @@ impl LocalOptimizer {
         box_bounds: Option<(&Vector3<f64>, &Vector3<f64>)>,
         intra_pairs: &[(usize, usize)],
     ) -> Result<f64, OptimizationError> {
+        let inter = InterModel::exact(receptor);
+        self.minimize_with_model(ligand, inter, forcefield, box_bounds, intra_pairs)
+    }
+
+    /// The minimization proper, scoring ligand-receptor energy through
+    /// `inter` (grids during search, exact pairwise otherwise).
+    pub(crate) fn minimize_with_model(
+        &self,
+        ligand: &mut Molecule,
+        inter: InterModel,
+        forcefield: &dyn ForceField,
+        box_bounds: Option<(&Vector3<f64>, &Vector3<f64>)>,
+        intra_pairs: &[(usize, usize)],
+    ) -> Result<f64, OptimizationError> {
         let base = ligand.clone();
         let n_dof = 6 + base.torsions.len();
 
         let mut x = DVector::zeros(n_dof);
-        let mut energy = self.calculate_energy(&base, receptor, forcefield, intra_pairs)?;
+        let mut energy = self.calculate_energy(&base, inter, forcefield, intra_pairs)?;
 
         // L-BFGS history
         let m = 10; // Number of corrections to store
@@ -128,7 +142,7 @@ impl LocalOptimizer {
         let mut y_history: Vec<DVector<f64>> = Vec::with_capacity(m);
         let mut rho_history: Vec<f64> = Vec::with_capacity(m);
 
-        let mut grad = self.compute_gradient(&base, receptor, forcefield, &x, intra_pairs)?;
+        let mut grad = self.compute_gradient(&base, inter, forcefield, &x, intra_pairs)?;
 
         for _ in 0..self.params.max_iterations {
             if grad.norm() < self.params.gradient_tolerance {
@@ -139,7 +153,7 @@ impl LocalOptimizer {
 
             let (step_size, new_energy) = self.line_search(
                 &base,
-                receptor,
+                inter,
                 forcefield,
                 &x,
                 &direction,
@@ -155,8 +169,7 @@ impl LocalOptimizer {
             }
 
             let new_x = &x + step_size * &direction;
-            let new_grad =
-                self.compute_gradient(&base, receptor, forcefield, &new_x, intra_pairs)?;
+            let new_grad = self.compute_gradient(&base, inter, forcefield, &new_x, intra_pairs)?;
 
             // L-BFGS curvature pair. Both gradients are taken at genuinely
             // different states, so `y` is non-zero and the history actually
@@ -222,7 +235,7 @@ impl LocalOptimizer {
     fn compute_gradient(
         &self,
         base: &Molecule,
-        receptor: &Molecule,
+        inter: InterModel,
         forcefield: &dyn ForceField,
         state: &DVector<f64>,
         intra_pairs: &[(usize, usize)],
@@ -231,19 +244,15 @@ impl LocalOptimizer {
         let mut grad = DVector::zeros(n_dof);
 
         let h = self.params.gradient_step;
-        let base_energy = self.calculate_energy(
-            &self.pose_at(base, state),
-            receptor,
-            forcefield,
-            intra_pairs,
-        )?;
+        let base_energy =
+            self.calculate_energy(&self.pose_at(base, state), inter, forcefield, intra_pairs)?;
 
         for i in 0..n_dof {
             let mut perturbed = state.clone();
             perturbed[i] += h;
             let energy_plus = self.calculate_energy(
                 &self.pose_at(base, &perturbed),
-                receptor,
+                inter,
                 forcefield,
                 intra_pairs,
             )?;
@@ -295,7 +304,7 @@ impl LocalOptimizer {
     fn line_search(
         &self,
         base: &Molecule,
-        receptor: &Molecule,
+        inter: InterModel,
         forcefield: &dyn ForceField,
         x: &DVector<f64>,
         direction: &DVector<f64>,
@@ -327,7 +336,7 @@ impl LocalOptimizer {
 
             if in_box {
                 let new_energy =
-                    self.calculate_energy(&candidate, receptor, forcefield, intra_pairs)?;
+                    self.calculate_energy(&candidate, inter, forcefield, intra_pairs)?;
 
                 // Armijo condition
                 if new_energy <= current_energy + c1 * step * directional_derivative {
@@ -350,11 +359,11 @@ impl LocalOptimizer {
     fn calculate_energy(
         &self,
         ligand: &Molecule,
-        receptor: &Molecule,
+        inter: InterModel,
         forcefield: &dyn ForceField,
         intra_pairs: &[(usize, usize)],
     ) -> Result<f64, OptimizationError> {
-        Ok(intermolecular_energy(ligand, receptor, forcefield)?
+        Ok(inter.energy(ligand, forcefield)?
             + intramolecular_energy(ligand, intra_pairs, forcefield)?)
     }
 }

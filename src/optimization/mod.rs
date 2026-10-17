@@ -23,6 +23,9 @@ pub enum OptimizationError {
     #[error("ForceField error: {0}")]
     ForceFieldError(#[from] crate::forcefield::ForceFieldError),
 
+    #[error("Grid error: {0}")]
+    GridError(#[from] crate::grid::GridError),
+
     #[error("Unknown error: {0}")]
     Unknown(String),
 }

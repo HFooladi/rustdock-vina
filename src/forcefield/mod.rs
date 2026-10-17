@@ -88,4 +88,16 @@ pub trait ForceField: Send + Sync {
     ) -> f64 {
         intermolecular_energy
     }
+
+    /// Whether ligand-receptor energy can be precomputed on per-type grids,
+    /// and over what range.
+    ///
+    /// Return `Some(cutoff)` only if [`atom_pair_energy`](Self::atom_pair_energy)
+    /// depends on nothing but the two atoms' types, their `is_hydrophobic` and
+    /// `is_hbond_donor` flags and the distance, is zero for hydrogens, and is
+    /// zero beyond `cutoff`. Charge-dependent force fields must return `None`
+    /// (the default), which keeps the search on exact pairwise sums.
+    fn grid_cutoff(&self) -> Option<f64> {
+        None
+    }
 }
