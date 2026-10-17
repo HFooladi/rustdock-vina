@@ -16,8 +16,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   top-pose recovery (< 2 A) from 2/16 to 7/16 seeds. New `dock` flags:
   `--grid-spacing` (default 0.375 A) and `--no-grid`. Force fields opt in via
   `ForceField::grid_cutoff`; AD4 (charge-dependent) stays pairwise.
+- The local optimizer computes its gradient analytically (per-atom forces
+  folded into force, torque and per-torsion projections, as Vina does) instead
+  of by finite differences, which cost `7 + n_torsions` energy evaluations per
+  gradient. New `ForceField::atom_pair_derivative` (closed form for Vina,
+  central difference by default). On 1IEP a 64-run grid dock drops from 1.4 s
+  to 0.6 s and an exact dock from 8.0 s to 2.0 s; at 128 runs (0.7 s) the top
+  pose is within 2 A of the crystal pose for 15/16 seeds.
+
+### Changed
+- The local optimizer rotates about the entry pose's centroid rather than the
+  current one, so rotation and torsion derivatives decouple.
 
 ### Fixed
+- Per-run seeds in `generate_poses` were `master + i`, so docks with nearby
+  master seeds repeated most of their runs (masters 0-15 over 8 runs shared
+  just 23 distinct seeds). Run seeds are now mixed with splitmix64.
 - Vina `xs` atom typing is now derived from the bond graph: carbons bonded to a
   heteroatom are `C_P` and not hydrophobic, and hydrogen-bond donors require an
   actual bonded polar hydrogen. Together these were worth about 5 kcal/mol of

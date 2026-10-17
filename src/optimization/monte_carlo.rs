@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use std::f64::consts::PI;
 
 use crate::forcefield::ForceField;
-use crate::grid::GridSet;
+use crate::grid::{pairwise_energy_and_gradient, GridSet};
 use crate::molecule::Molecule;
 use crate::optimization::local::{LocalOptimizer, LocalOptimizerParams};
 use crate::optimization::{DockingResult, OptimizationError, Optimizer};
@@ -371,6 +371,15 @@ impl<'a> InterModel<'a> {
         }
     }
 
+    /// Grid scoring, with `receptor` behind it.
+    #[cfg(test)]
+    pub(crate) fn with_grids(receptor: &'a Molecule, grids: &'a GridSet) -> Self {
+        Self {
+            receptor,
+            grids: Some(grids),
+        }
+    }
+
     pub(crate) fn energy(
         &self,
         ligand: &Molecule,
@@ -380,6 +389,27 @@ impl<'a> InterModel<'a> {
             Some(grids) => Ok(grids.energy(ligand, forcefield)?),
             None => intermolecular_energy(ligand, self.receptor, forcefield),
         }
+    }
+
+    /// As [`energy`](Self::energy), additionally adding each ligand atom's
+    /// gradient `dE/dr_i` into `grads`.
+    pub(crate) fn energy_and_gradients(
+        &self,
+        ligand: &Molecule,
+        forcefield: &dyn ForceField,
+        grads: &mut [Vector3<f64>],
+    ) -> Result<f64, OptimizationError> {
+        if let Some(grids) = self.grids {
+            return Ok(grids.energy_and_gradients(ligand, forcefield, grads)?);
+        }
+        let mut total = 0.0;
+        for (atom, grad) in ligand.atoms.iter().zip(grads) {
+            let (energy, gradient) =
+                pairwise_energy_and_gradient(atom, &self.receptor.atoms, forcefield)?;
+            total += energy;
+            *grad += gradient;
+        }
+        Ok(total)
     }
 }
 
@@ -419,6 +449,29 @@ pub(crate) fn intramolecular_energy(
         let distance = a.distance(b);
         if distance > 0.01 {
             total += forcefield.atom_pair_energy(a, b, distance)?;
+        }
+    }
+    Ok(total)
+}
+
+/// As [`intramolecular_energy`], additionally adding each atom's gradient
+/// into `grads`.
+pub(crate) fn intramolecular_energy_and_gradients(
+    ligand: &Molecule,
+    pairs: &[(usize, usize)],
+    forcefield: &dyn ForceField,
+    grads: &mut [Vector3<f64>],
+) -> Result<f64, OptimizationError> {
+    let mut total = 0.0;
+    for &(i, j) in pairs {
+        let (a, b) = (&ligand.atoms[i], &ligand.atoms[j]);
+        let delta = a.coordinates - b.coordinates;
+        let distance = delta.norm();
+        if distance > 0.01 {
+            total += forcefield.atom_pair_energy(a, b, distance)?;
+            let g = delta * (forcefield.atom_pair_derivative(a, b, distance)? / distance);
+            grads[i] += g;
+            grads[j] -= g;
         }
     }
     Ok(total)
@@ -464,16 +517,15 @@ impl Optimizer for MonteCarlo {
         // One set of grids serves every run.
         let grids = self.build_grids(ligand, &pruned, forcefield, &center, &box_size)?;
 
-        // Generate poses in parallel using rayon. If a master seed is set, derive
-        // a distinct per-pose seed so the parallel pose set stays reproducible
-        // (each worker still gets an uncorrelated stream because StdRng's
-        // seed_from_u64 hashes the input internally).
+        // Generate poses in parallel using rayon. If a master seed is set, each
+        // run gets its own seed mixed from (master, run index), so the parallel
+        // pose set stays reproducible and no two master seeds share runs.
         let master_seed = self.params.seed;
         let results: Result<Vec<DockingResult>, OptimizationError> = (0..num_poses)
             .into_par_iter()
             .map(|i| {
                 let per_pose = MonteCarlo::with_params(MonteCarloParams {
-                    seed: master_seed.map(|s| s.wrapping_add(i as u64)),
+                    seed: master_seed.map(|s| run_seed(s, i as u64)),
                     ..self.params.clone()
                 });
                 per_pose.run(
@@ -558,6 +610,24 @@ fn prune_receptor(
     pruned
 }
 
+/// Seed for run `run` of a docking job with master seed `master`.
+///
+/// Simply adding the index made master `m` run `i + 1` identical to master
+/// `m + 1` run `i`, so docks with nearby seeds silently repeated most of their
+/// runs. Mixing both inputs through splitmix64 keeps every (master, run) pair
+/// distinct.
+fn run_seed(master: u64, run: u64) -> u64 {
+    const GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+    splitmix64(splitmix64(master).wrapping_add(run.wrapping_add(1).wrapping_mul(GAMMA)))
+}
+
+/// The splitmix64 finalizer: a fast, well-mixed 64-bit bijection.
+fn splitmix64(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 /// Distance from the ligand's centroid to its furthest atom.
 fn ligand_radius(ligand: &Molecule) -> f64 {
     ligand
@@ -613,4 +683,20 @@ fn calculate_rmsd(mol1: &Molecule, mol2: &Molecule) -> f64 {
     }
 
     (sum_sq_diff / mol1.atoms.len() as f64).sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// Nearby master seeds must not share runs. With `master + run`, masters
+    /// 0..16 over 8 runs produced only 23 distinct seeds out of 128.
+    #[test]
+    fn test_run_seeds_do_not_collide_across_masters() {
+        let seeds: HashSet<u64> = (0..16)
+            .flat_map(|master| (0..8).map(move |run| run_seed(master, run)))
+            .collect();
+        assert_eq!(seeds.len(), 16 * 8);
+    }
 }

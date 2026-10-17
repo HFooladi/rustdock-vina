@@ -2,17 +2,22 @@
 //!
 //! This module implements BFGS-style local optimization for refining docking poses.
 
-use nalgebra::{DVector, Unit, UnitQuaternion, Vector3};
+use nalgebra::{DVector, Matrix3, Unit, UnitQuaternion, Vector3};
 
 use crate::forcefield::ForceField;
 use crate::molecule::Molecule;
-use crate::optimization::monte_carlo::{intramolecular_energy, InterModel};
+use crate::optimization::monte_carlo::{
+    intramolecular_energy, intramolecular_energy_and_gradients, InterModel,
+};
 use crate::optimization::OptimizationError;
 
 /// Parameters for local optimization
 #[derive(Debug, Clone)]
 pub struct LocalOptimizerParams {
-    /// Step size for finite difference gradient computation
+    /// Step size for finite-difference gradients.
+    ///
+    /// The optimizer itself uses analytic gradients; this is only used to
+    /// cross-check them.
     pub gradient_step: f64,
 
     /// Initial step size for line search
@@ -131,6 +136,7 @@ impl LocalOptimizer {
         intra_pairs: &[(usize, usize)],
     ) -> Result<f64, OptimizationError> {
         let base = ligand.clone();
+        let chart = Chart::new(&base);
         let n_dof = 6 + base.torsions.len();
 
         let mut x = DVector::zeros(n_dof);
@@ -142,7 +148,7 @@ impl LocalOptimizer {
         let mut y_history: Vec<DVector<f64>> = Vec::with_capacity(m);
         let mut rho_history: Vec<f64> = Vec::with_capacity(m);
 
-        let mut grad = self.compute_gradient(&base, inter, forcefield, &x, intra_pairs)?;
+        let mut grad = self.compute_gradient(&chart, inter, forcefield, &x, intra_pairs)?;
 
         for _ in 0..self.params.max_iterations {
             if grad.norm() < self.params.gradient_tolerance {
@@ -152,7 +158,7 @@ impl LocalOptimizer {
             let direction = self.lbfgs_direction(&grad, &s_history, &y_history, &rho_history);
 
             let (step_size, new_energy) = self.line_search(
-                &base,
+                &chart,
                 inter,
                 forcefield,
                 &x,
@@ -169,7 +175,7 @@ impl LocalOptimizer {
             }
 
             let new_x = &x + step_size * &direction;
-            let new_grad = self.compute_gradient(&base, inter, forcefield, &new_x, intra_pairs)?;
+            let new_grad = self.compute_gradient(&chart, inter, forcefield, &new_x, intra_pairs)?;
 
             // L-BFGS curvature pair. Both gradients are taken at genuinely
             // different states, so `y` is non-zero and the history actually
@@ -199,66 +205,55 @@ impl LocalOptimizer {
             }
         }
 
-        *ligand = self.pose_at(&base, &x);
+        *ligand = chart.pose(&x);
         Ok(energy)
     }
 
-    /// Build the conformation reached by applying state `x` to `base`.
+    /// Energy gradient with respect to the state, computed analytically.
     ///
-    /// Torsions are applied first so that the rigid-body rotation and
-    /// translation act on the final internal geometry.
-    fn pose_at(&self, base: &Molecule, x: &DVector<f64>) -> Molecule {
-        let mut mol = base.clone();
-
-        for i in 0..base.torsions.len() {
-            let delta = x[6 + i];
-            if delta != 0.0 {
-                // A torsion that cannot be rotated (malformed tree) is skipped
-                // rather than aborting the whole minimization.
-                let _ = mol.rotate_torsion(i, delta);
-            }
-        }
-
-        let rot_axis = Vector3::new(x[3], x[4], x[5]);
-        let rot_angle = rot_axis.norm();
-        if rot_angle > 1e-10 {
-            let rotation =
-                UnitQuaternion::from_axis_angle(&Unit::new_normalize(rot_axis), rot_angle);
-            mol.rotate_about_center(&rotation);
-        }
-
-        mol.translate(&Vector3::new(x[0], x[1], x[2]));
-        mol
-    }
-
-    /// Compute gradient using forward finite differences in state space.
+    /// One pass gives every atom's `dE/dr_i`; the chain rule through
+    /// [`Chart::pose`] then turns those into the translation, rotation and
+    /// torsion components. This replaces `6 + n_torsions` extra energy
+    /// evaluations per gradient with none.
     fn compute_gradient(
         &self,
-        base: &Molecule,
+        chart: &Chart,
         inter: InterModel,
         forcefield: &dyn ForceField,
         state: &DVector<f64>,
         intra_pairs: &[(usize, usize)],
     ) -> Result<DVector<f64>, OptimizationError> {
-        let n_dof = state.len();
-        let mut grad = DVector::zeros(n_dof);
+        let pose = chart.pose(state);
+        let mut atom_grads = vec![Vector3::zeros(); pose.atoms.len()];
+        inter.energy_and_gradients(&pose, forcefield, &mut atom_grads)?;
+        intramolecular_energy_and_gradients(&pose, intra_pairs, forcefield, &mut atom_grads)?;
+        Ok(chart.state_gradient(&pose, state, &atom_grads))
+    }
 
+    /// Forward finite-difference gradient in state space, kept to validate
+    /// [`compute_gradient`](Self::compute_gradient).
+    #[cfg(test)]
+    fn finite_difference_gradient(
+        &self,
+        chart: &Chart,
+        inter: InterModel,
+        forcefield: &dyn ForceField,
+        state: &DVector<f64>,
+        intra_pairs: &[(usize, usize)],
+    ) -> Result<DVector<f64>, OptimizationError> {
         let h = self.params.gradient_step;
-        let base_energy =
-            self.calculate_energy(&self.pose_at(base, state), inter, forcefield, intra_pairs)?;
-
-        for i in 0..n_dof {
-            let mut perturbed = state.clone();
-            perturbed[i] += h;
-            let energy_plus = self.calculate_energy(
-                &self.pose_at(base, &perturbed),
-                inter,
-                forcefield,
-                intra_pairs,
-            )?;
-            grad[i] = (energy_plus - base_energy) / h;
+        let mut grad = DVector::zeros(state.len());
+        for i in 0..state.len() {
+            let mut plus = state.clone();
+            let mut minus = state.clone();
+            plus[i] += h;
+            minus[i] -= h;
+            let e_plus =
+                self.calculate_energy(&chart.pose(&plus), inter, forcefield, intra_pairs)?;
+            let e_minus =
+                self.calculate_energy(&chart.pose(&minus), inter, forcefield, intra_pairs)?;
+            grad[i] = (e_plus - e_minus) / (2.0 * h);
         }
-
         Ok(grad)
     }
 
@@ -303,7 +298,7 @@ impl LocalOptimizer {
     #[allow(clippy::too_many_arguments)]
     fn line_search(
         &self,
-        base: &Molecule,
+        chart: &Chart,
         inter: InterModel,
         forcefield: &dyn ForceField,
         x: &DVector<f64>,
@@ -327,7 +322,7 @@ impl LocalOptimizer {
         for _ in 0..20 {
             // Max line search iterations
             let new_x = x + step * direction;
-            let candidate = self.pose_at(base, &new_x);
+            let candidate = chart.pose(&new_x);
 
             // Shrink the step rather than accepting a pose that leaves the box.
             let in_box = box_bounds
@@ -365,5 +360,233 @@ impl LocalOptimizer {
     ) -> Result<f64, OptimizationError> {
         Ok(inter.energy(ligand, forcefield)?
             + intramolecular_energy(ligand, intra_pairs, forcefield)?)
+    }
+}
+
+/// The coordinate chart the local optimizer works in.
+///
+/// State `x = [t, phi, dtheta]` maps to positions
+/// `r_i = pivot + R(phi) (p_i(dtheta) - pivot) + t`, where `p_i` applies the
+/// torsion changes to the entry pose and `pivot` is the entry pose's
+/// centroid. The pivot is fixed for the whole minimization: rotating about
+/// the *current* centroid instead would make it depend on the torsions and
+/// couple the rotation and torsion derivatives.
+struct Chart<'m> {
+    base: &'m Molecule,
+    pivot: Vector3<f64>,
+}
+
+impl<'m> Chart<'m> {
+    fn new(base: &'m Molecule) -> Self {
+        let pivot = base.center().unwrap_or_else(|_| Vector3::zeros());
+        Self { base, pivot }
+    }
+
+    /// Build the conformation reached by applying state `x` to the entry pose.
+    ///
+    /// Torsions are applied first so that the rigid-body rotation and
+    /// translation act on the final internal geometry.
+    fn pose(&self, x: &DVector<f64>) -> Molecule {
+        let mut mol = self.base.clone();
+
+        for i in 0..self.base.torsions.len() {
+            let delta = x[6 + i];
+            if delta != 0.0 {
+                // A torsion that cannot be rotated (malformed tree) is skipped
+                // rather than aborting the whole minimization.
+                let _ = mol.rotate_torsion(i, delta);
+            }
+        }
+
+        let rotation = rotation_of(x);
+        let shift = self.pivot + Vector3::new(x[0], x[1], x[2]);
+        for atom in &mut mol.atoms {
+            atom.coordinates = rotation.transform_vector(&(atom.coordinates - self.pivot)) + shift;
+        }
+        mol
+    }
+
+    /// Chain rule from per-atom gradients `atom_grads` at `pose` (which must
+    /// be `self.pose(x)`) to the state gradient.
+    fn state_gradient(
+        &self,
+        pose: &Molecule,
+        x: &DVector<f64>,
+        atom_grads: &[Vector3<f64>],
+    ) -> DVector<f64> {
+        let mut grad = DVector::zeros(x.len());
+        let shift = self.pivot + Vector3::new(x[0], x[1], x[2]);
+
+        // Translation moves every atom equally; rotation contributes the
+        // torque about the (shifted) pivot, mapped back through the SO(3)
+        // left Jacobian because phi is a rotation vector, not an increment.
+        let mut force = Vector3::zeros();
+        let mut torque = Vector3::zeros();
+        for (atom, g) in pose.atoms.iter().zip(atom_grads) {
+            force += g;
+            torque += (atom.coordinates - shift).cross(g);
+        }
+        let phi = Vector3::new(x[3], x[4], x[5]);
+        let d_phi = left_jacobian(&phi).transpose() * torque;
+        for k in 0..3 {
+            grad[k] = force[k];
+            grad[3 + k] = d_phi[k];
+        }
+
+        // A torsion swings its moving atoms about its bond. With a nested
+        // torsion tree that motion, read in the final frame, is
+        // axis x (r_i - origin) for each moving atom.
+        for (k, torsion) in self.base.torsions.iter().enumerate() {
+            let Some(bond) = self.base.bonds.get(torsion.bond_idx) else {
+                continue;
+            };
+            let (Some(a1), Some(a2)) = (
+                pose.atoms.get(bond.atom1_idx),
+                pose.atoms.get(bond.atom2_idx),
+            ) else {
+                continue;
+            };
+            let axis = a2.coordinates - a1.coordinates;
+            if axis.norm() < 1e-10 || torsion.moving_atoms.iter().any(|&i| i >= pose.atoms.len()) {
+                continue;
+            }
+            let axis = axis.normalize();
+            grad[6 + k] = torsion
+                .moving_atoms
+                .iter()
+                .map(|&i| {
+                    atom_grads[i].dot(&axis.cross(&(pose.atoms[i].coordinates - a1.coordinates)))
+                })
+                .sum();
+        }
+
+        grad
+    }
+}
+
+/// The rotation encoded by the rotation-vector part of the state.
+fn rotation_of(x: &DVector<f64>) -> UnitQuaternion<f64> {
+    let phi = Vector3::new(x[3], x[4], x[5]);
+    let angle = phi.norm();
+    if angle > 1e-10 {
+        UnitQuaternion::from_axis_angle(&Unit::new_normalize(phi), angle)
+    } else {
+        UnitQuaternion::identity()
+    }
+}
+
+/// Left Jacobian of SO(3) at rotation vector `phi`: how a change in `phi`
+/// shows up as an infinitesimal rotation applied on the left.
+fn left_jacobian(phi: &Vector3<f64>) -> Matrix3<f64> {
+    let theta = phi.norm();
+    let k = phi.cross_matrix();
+    let (a, b) = if theta < 1e-4 {
+        // Series expansions of the coefficients below.
+        (
+            0.5 - theta * theta / 24.0,
+            1.0 / 6.0 - theta * theta / 120.0,
+        )
+    } else {
+        let t2 = theta * theta;
+        (
+            (1.0 - theta.cos()) / t2,
+            (theta - theta.sin()) / (t2 * theta),
+        )
+    };
+    Matrix3::identity() + k * a + k * k * b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::forcefield::vina::VinaForceField;
+    use crate::grid::GridSet;
+    use crate::io::parse_pdbqt;
+    use rand::prelude::*;
+    use rand::rngs::StdRng;
+    use std::path::PathBuf;
+
+    fn benchmark(name: &str) -> Molecule {
+        parse_pdbqt(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("benchmark_data")
+                .join(name),
+        )
+        .unwrap()
+    }
+
+    /// The analytic state gradient must match finite differences on a real
+    /// flexible ligand, for both grid and exact scoring, at states with
+    /// non-trivial rotation and torsion offsets. This is also the check that
+    /// the parsed torsion tree is nested, which the torsion formula assumes.
+    #[test]
+    fn test_analytic_gradient_matches_finite_difference() {
+        let receptor = benchmark("receptor.pdbqt");
+        let ligand = benchmark("ligand.pdbqt");
+        let ff = VinaForceField::default();
+        let pairs = ligand.intramolecular_pairs();
+        let center = ligand.center().unwrap();
+        let grids = GridSet::build(
+            &ligand,
+            &receptor,
+            &ff,
+            &center,
+            &Vector3::repeat(16.0),
+            4.0,
+            0.375,
+        )
+        .unwrap()
+        .unwrap();
+
+        let optimizer = LocalOptimizer::with_params(LocalOptimizerParams {
+            gradient_step: 1e-5,
+            ..LocalOptimizerParams::default()
+        });
+        let chart = Chart::new(&ligand);
+        let n_dof = 6 + ligand.torsions.len();
+        let mut rng = StdRng::seed_from_u64(3);
+
+        for model in [
+            InterModel::exact(&receptor),
+            InterModel::with_grids(&receptor, &grids),
+        ] {
+            for _ in 0..4 {
+                let x = DVector::from_fn(n_dof, |i, _| {
+                    let scale = if i < 3 { 0.5 } else { 0.6 };
+                    (rng.gen::<f64>() - 0.5) * 2.0 * scale
+                });
+                let analytic = optimizer
+                    .compute_gradient(&chart, model, &ff, &x, &pairs)
+                    .unwrap();
+                let numeric = optimizer
+                    .finite_difference_gradient(&chart, model, &ff, &x, &pairs)
+                    .unwrap();
+                let err = (&analytic - &numeric).norm() / numeric.norm().max(1.0);
+                assert!(
+                    err < 1e-3,
+                    "relative error {err}\nanalytic {analytic}\nnumeric {numeric}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_left_jacobian_matches_finite_difference() {
+        let phi = Vector3::new(0.7, -0.4, 1.1);
+        let v = Vector3::new(0.3, 2.0, -1.0);
+        let r = |p: &Vector3<f64>| {
+            let x = DVector::from_vec(vec![0.0, 0.0, 0.0, p.x, p.y, p.z]);
+            rotation_of(&x).transform_vector(&v)
+        };
+        let jac = left_jacobian(&phi);
+        let rv = r(&phi);
+        let h = 1e-6;
+        for k in 0..3 {
+            let mut dp = Vector3::zeros();
+            dp[k] = h;
+            let numeric = (r(&(phi + dp)) - r(&(phi - dp))) / (2.0 * h);
+            let analytic = (jac * dp / h).cross(&rv);
+            assert!((numeric - analytic).norm() < 1e-6, "column {k}");
+        }
     }
 }

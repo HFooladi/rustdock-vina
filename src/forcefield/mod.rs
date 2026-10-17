@@ -34,6 +34,23 @@ pub trait ForceField: Send + Sync {
         distance: f64,
     ) -> Result<f64, ForceFieldError>;
 
+    /// Derivative of [`atom_pair_energy`](Self::atom_pair_energy) with
+    /// respect to the distance, `dE/dr`.
+    ///
+    /// The default is a central difference, which is correct for any force
+    /// field; implementations with a closed form should override it.
+    fn atom_pair_derivative(
+        &self,
+        atom1: &Atom,
+        atom2: &Atom,
+        distance: f64,
+    ) -> Result<f64, ForceFieldError> {
+        const H: f64 = 1e-5;
+        let plus = self.atom_pair_energy(atom1, atom2, distance + H)?;
+        let minus = self.atom_pair_energy(atom1, atom2, (distance - H).max(0.0))?;
+        Ok((plus - minus) / (distance + H - (distance - H).max(0.0)))
+    }
+
     /// Calculate van der Waals interaction energy
     fn vdw_energy(&self, atom1: &Atom, atom2: &Atom, distance: f64)
         -> Result<f64, ForceFieldError>;
