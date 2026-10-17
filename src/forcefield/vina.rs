@@ -147,6 +147,28 @@ impl ForceField for VinaForceField {
         Ok(gauss1 + gauss2 + repulsion + hydrophobic + hbond)
     }
 
+    fn atom_pair_derivative(
+        &self,
+        atom1: &Atom,
+        atom2: &Atom,
+        distance: f64,
+    ) -> Result<f64, ForceFieldError> {
+        if atom1.atom_type.is_hydrogen()
+            || atom2.atom_type.is_hydrogen()
+            || !(0.01..=CUTOFF).contains(&distance)
+        {
+            return Ok(0.0);
+        }
+
+        // Every term is a function of d = r - r1 - r2, so dE/dr = dE/dd.
+        let d = Self::surface_distance(atom1, atom2, distance);
+        Ok(self.gauss1_derivative(d)
+            + self.gauss2_derivative(d)
+            + self.repulsion_derivative(d)
+            + self.hydrophobic_derivative(atom1, atom2, d)
+            + self.hbond_derivative(atom1, atom2, d))
+    }
+
     fn vdw_energy(
         &self,
         atom1: &Atom,
@@ -329,6 +351,45 @@ impl VinaForceField {
 
         self.params.weight_hydrogen * h
     }
+
+    #[inline]
+    fn gauss1_derivative(&self, d: f64) -> f64 {
+        self.gauss1_term(d) * (-8.0 * d)
+    }
+
+    #[inline]
+    fn gauss2_derivative(&self, d: f64) -> f64 {
+        self.gauss2_term(d) * (-(d - 3.0) / 2.0)
+    }
+
+    #[inline]
+    fn repulsion_derivative(&self, d: f64) -> f64 {
+        if d < 0.0 {
+            2.0 * self.params.weight_repulsion * d
+        } else {
+            0.0
+        }
+    }
+
+    #[inline]
+    fn hydrophobic_derivative(&self, atom1: &Atom, atom2: &Atom, d: f64) -> f64 {
+        if Self::is_hydrophobic(atom1) && Self::is_hydrophobic(atom2) && (0.5..1.5).contains(&d) {
+            -self.params.weight_hydrophobic
+        } else {
+            0.0
+        }
+    }
+
+    #[inline]
+    fn hbond_derivative(&self, atom1: &Atom, atom2: &Atom, d: f64) -> f64 {
+        let is_hbond_pair = (Self::is_hbond_donor(atom1) && Self::is_hbond_acceptor(atom2))
+            || (Self::is_hbond_donor(atom2) && Self::is_hbond_acceptor(atom1));
+        if is_hbond_pair && (-0.7..0.0).contains(&d) {
+            -self.params.weight_hydrogen / 0.7
+        } else {
+            0.0
+        }
+    }
 }
 
 #[cfg(test)]
@@ -455,6 +516,37 @@ mod tests {
             "pairs beyond 8 A centre-to-centre are not scored"
         );
         assert!(ff.atom_pair_energy(&c1, &c2, 7.5).unwrap() != 0.0);
+    }
+
+    /// The closed-form derivative must agree with a central difference of
+    /// the energy everywhere the energy is smooth: through the repulsive
+    /// overlap, both gauss peaks, and the hydrophobic and H-bond ramps.
+    #[test]
+    fn test_pair_derivative_matches_finite_difference() {
+        let ff = VinaForceField::new();
+        let carbon = create_test_atom(AtomType::Carbon, 0.0, 0.0, 0.0);
+        let mut donor = create_test_atom(AtomType::NitrogenH, 0.0, 0.0, 0.0);
+        donor.is_hbond_donor = true;
+        let acceptor = create_test_atom(AtomType::OxygenH, 0.0, 0.0, 0.0);
+
+        let h = 1e-6;
+        for (a, b) in [(&carbon, &carbon), (&donor, &acceptor)] {
+            let r0 = a.atom_type.radius() + b.atom_type.radius();
+            // Offsets from contact, avoiding the ramp kinks and the 8 A cutoff.
+            for offset in [-1.2, -0.9, -0.35, 0.1, 0.25, 0.9, 1.3, 2.0, 3.0, 3.9] {
+                let r = r0 + offset;
+                let numeric = (ff.atom_pair_energy(a, b, r + h).unwrap()
+                    - ff.atom_pair_energy(a, b, r - h).unwrap())
+                    / (2.0 * h);
+                let analytic = ff.atom_pair_derivative(a, b, r).unwrap();
+                assert!(
+                    (numeric - analytic).abs() < 1e-6,
+                    "{:?}-{:?} at d={offset}: analytic {analytic} vs numeric {numeric}",
+                    a.atom_type,
+                    b.atom_type
+                );
+            }
+        }
     }
 
     #[test]

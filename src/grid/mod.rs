@@ -118,6 +118,19 @@ impl Grid {
 
     /// Get a value from the grid at real-space coordinates with trilinear interpolation
     pub fn get_value(&self, position: &Vector3<f64>) -> Result<f64, GridError> {
+        Ok(self.value_and_gradient(position)?.0)
+    }
+
+    /// Trilinearly interpolated value at `position` together with its
+    /// gradient with respect to `position`.
+    ///
+    /// The gradient is the exact derivative of the interpolant, so it is
+    /// piecewise constant along each axis within a cell and consistent with
+    /// [`get_value`](Self::get_value).
+    pub fn value_and_gradient(
+        &self,
+        position: &Vector3<f64>,
+    ) -> Result<(f64, Vector3<f64>), GridError> {
         // Calculate grid indices as floating point
         let x_f = (position.x - self.origin.x) / self.spacing;
         let y_f = (position.y - self.origin.y) / self.spacing;
@@ -135,9 +148,9 @@ impl Grid {
         }
 
         // Get integer indices
-        let x0 = x_f.floor() as usize;
-        let y0 = y_f.floor() as usize;
-        let z0 = z_f.floor() as usize;
+        let x0 = x_f.max(0.0).floor() as usize;
+        let y0 = y_f.max(0.0).floor() as usize;
+        let z0 = z_f.max(0.0).floor() as usize;
 
         // Handle edge case at the maximum boundary
         let x1 = (x0 + 1).min(self.dimensions.x - 1);
@@ -168,9 +181,19 @@ impl Grid {
         let c0 = c00 * (1.0 - dy) + c10 * dy;
         let c1 = c01 * (1.0 - dy) + c11 * dy;
 
-        let result = c0 * (1.0 - dz) + c1 * dz;
+        let value = c0 * (1.0 - dz) + c1 * dz;
 
-        Ok(result)
+        // Partial derivatives of the interpolant in grid units, then scaled
+        // to real space.
+        let d_dz = c1 - c0;
+        let d_dy = (c10 - c00) * (1.0 - dz) + (c11 - c01) * dz;
+        let e00 = v100 - v000;
+        let e01 = v101 - v001;
+        let e10 = v110 - v010;
+        let e11 = v111 - v011;
+        let d_dx = (e00 * (1.0 - dy) + e10 * dy) * (1.0 - dz) + (e01 * (1.0 - dy) + e11 * dy) * dz;
+
+        Ok((value, Vector3::new(d_dx, d_dy, d_dz) / self.spacing))
     }
 
     /// Load a grid from an AutoDock map file
@@ -324,6 +347,48 @@ impl GridSet {
         }
         Ok(total)
     }
+
+    /// As [`energy`](Self::energy), additionally *adding* each ligand atom's
+    /// energy gradient `dE/dr_i` into `grads` (one entry per ligand atom).
+    pub fn energy_and_gradients(
+        &self,
+        ligand: &Molecule,
+        forcefield: &dyn ForceField,
+        grads: &mut [Vector3<f64>],
+    ) -> Result<f64, ForceFieldError> {
+        let mut total = 0.0;
+        for ((atom, grid), grad) in ligand.atoms.iter().zip(&self.atom_grid).zip(grads) {
+            let Some(g) = grid else { continue };
+            let (energy, gradient) = match self.grids[*g].value_and_gradient(&atom.coordinates) {
+                Ok(found) => found,
+                Err(_) => pairwise_energy_and_gradient(atom, &self.receptor, forcefield)?,
+            };
+            total += energy;
+            *grad += gradient;
+        }
+        Ok(total)
+    }
+}
+
+/// Exact energy of one atom against a list of receptor atoms, and its
+/// gradient with respect to the atom's position.
+pub(crate) fn pairwise_energy_and_gradient(
+    atom: &Atom,
+    receptor: &[Atom],
+    forcefield: &dyn ForceField,
+) -> Result<(f64, Vector3<f64>), ForceFieldError> {
+    let mut energy = 0.0;
+    let mut gradient = Vector3::zeros();
+    for rec_atom in receptor {
+        let delta = atom.coordinates - rec_atom.coordinates;
+        let distance = delta.norm();
+        if distance > 0.01 {
+            energy += forcefield.atom_pair_energy(atom, rec_atom, distance)?;
+            gradient +=
+                delta * (forcefield.atom_pair_derivative(atom, rec_atom, distance)? / distance);
+        }
+    }
+    Ok((energy, gradient))
 }
 
 /// Exact energy of one atom against a list of receptor atoms.
@@ -489,6 +554,50 @@ mod tests {
 
         let grid_energy = grids.energy(&ligand, &ff).unwrap();
         assert!((grid_energy - exact(&ligand, &receptor(), &ff)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_grid_gradient_matches_finite_difference() {
+        let ligand = ligand_at(&[Vector3::new(4.1, 0.7, 0.3)]);
+        let grids = build(&ligand, 0.375);
+        let grid = &grids.grids[0];
+
+        let h = 1e-6;
+        for p in [
+            Vector3::new(4.1, 0.7, 0.3),
+            Vector3::new(1.37, 3.21, -2.11),
+            Vector3::new(-2.9, -1.05, 4.4),
+        ] {
+            let (_, analytic) = grid.value_and_gradient(&p).unwrap();
+            for axis in 0..3 {
+                let mut step = Vector3::zeros();
+                step[axis] = h;
+                let numeric = (grid.get_value(&(p + step)).unwrap()
+                    - grid.get_value(&(p - step)).unwrap())
+                    / (2.0 * h);
+                assert!(
+                    (numeric - analytic[axis]).abs() < 1e-5,
+                    "axis {axis} at {p:?}: analytic {} vs numeric {numeric}",
+                    analytic[axis]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_out_of_grid_gradient_is_exact() {
+        let ligand = ligand_at(&[Vector3::new(7.5, 0.0, 0.0)]);
+        let grids = build(&ligand, 0.5);
+        let ff = VinaForceField::default();
+        let mut grads = vec![Vector3::zeros(); 1];
+        grids
+            .energy_and_gradients(&ligand, &ff, &mut grads)
+            .unwrap();
+
+        let (_, expected) =
+            pairwise_energy_and_gradient(&ligand.atoms[0], &receptor().atoms, &ff).unwrap();
+        assert!((grads[0] - expected).norm() < 1e-12);
+        assert!(expected.norm() > 0.0, "test point must feel the receptor");
     }
 
     #[test]
