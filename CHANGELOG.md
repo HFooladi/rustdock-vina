@@ -24,10 +24,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to 0.6 s and an exact dock from 8.0 s to 2.0 s; at 128 runs (0.7 s) the top
   pose is within 2 A of the crystal pose for 15/16 seeds.
 
-### Changed
-- The local optimizer rotates about the entry pose's centroid rather than the
-  current one, so rotation and torsion derivatives decouple.
-
 ### Fixed
 - Per-run seeds in `generate_poses` were `master + i`, so docks with nearby
   master seeds repeated most of their runs (masters 0-15 over 8 runs shared
@@ -61,6 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Vina's basin-hopping; temperature raised to Vina's 1.2.
 - Logging defaults to `info`, and `dock` prints a Vina-style results table.
 - `--scoring ad4` warns that it is experimental and unvalidated.
+- The local optimizer rotates about the entry pose's centroid rather than the
+  current one, so rotation and torsion derivatives decouple.
 
 ### Removed
 - Placeholder `Molecule::calculate_internal_energy` (a bare inverse-distance
