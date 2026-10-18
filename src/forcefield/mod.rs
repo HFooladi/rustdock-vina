@@ -96,13 +96,10 @@ pub trait ForceField: Send + Sync {
     ) -> Result<f64, ForceFieldError>;
 
     /// Apply torsional normalization to convert intermolecular energy to binding affinity
-    /// This is used by Vina scoring: affinity = energy / (1 + weight_rot * N_rot)
+    /// This is used by Vina scoring: affinity = energy / (1 + weight_rot * num_tors), with
+    /// `num_tors` from [`Molecule::vina_torsion_count`](crate::molecule::Molecule::vina_torsion_count).
     /// Default implementation returns the energy unchanged (for forcefields without this feature)
-    fn apply_torsional_normalization(
-        &self,
-        intermolecular_energy: f64,
-        _num_rotatable_bonds: usize,
-    ) -> f64 {
+    fn apply_torsional_normalization(&self, intermolecular_energy: f64, _num_tors: f64) -> f64 {
         intermolecular_energy
     }
 

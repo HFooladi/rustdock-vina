@@ -340,13 +340,13 @@ fn benchmark_data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benchmark_data")
 }
 
-/// Scoring the crystal pose of 1IEP must land close to AutoDock Vina.
+/// Scoring the crystal pose of 1IEP must match AutoDock Vina.
 ///
-/// Real Vina reports an intermolecular energy of -16.026 for this complex,
-/// which becomes -11.865 kcal/mol after dividing by `1 + 0.05846 * 6`. This is
-/// the test that pins the atom typing: treating every carbon as hydrophobic
-/// and inferring H-bond donors from `NA`/`OA` labels put this near -16.8,
-/// roughly 5 kcal/mol too favourable, and nothing in the suite noticed.
+/// AutoDock Vina 1.2.7 (`--score_only --autobox` on these two files) reports
+/// an intermolecular energy of -14.759 and an affinity of -10.927 kcal/mol.
+/// Treating every carbon as hydrophobic and inferring H-bond donors from
+/// `NA`/`OA` labels once put this near -16.8. The CASF-2016 parity harness
+/// (`benchmark/parity/`) checks the same agreement across many complexes.
 #[test]
 fn test_1iep_crystal_pose_scores_close_to_vina() {
     let receptor =
@@ -363,14 +363,19 @@ fn test_1iep_crystal_pose_scores_close_to_vina() {
             }
         }
     }
-    let affinity = forcefield.calculate_affinity(inter, ligand.torsions.len());
+    let affinity = forcefield.calculate_affinity(inter, ligand.vina_torsion_count());
 
-    const VINA_REFERENCE: f64 = -11.865;
-    const TOLERANCE: f64 = 1.5;
+    // Vina prints three decimals, so allow for its rounding.
+    const VINA_INTER: f64 = -14.759;
+    const VINA_AFFINITY: f64 = -10.927;
+    const TOLERANCE: f64 = 0.01;
     assert!(
-        (affinity - VINA_REFERENCE).abs() < TOLERANCE,
-        "1IEP crystal-pose affinity {affinity:.3} kcal/mol is more than \
-         {TOLERANCE} from Vina's {VINA_REFERENCE}"
+        (inter - VINA_INTER).abs() < TOLERANCE,
+        "1IEP crystal-pose intermolecular energy {inter:.3} is not Vina's {VINA_INTER}"
+    );
+    assert!(
+        (affinity - VINA_AFFINITY).abs() < TOLERANCE,
+        "1IEP crystal-pose affinity {affinity:.3} kcal/mol is not Vina's {VINA_AFFINITY}"
     );
 }
 

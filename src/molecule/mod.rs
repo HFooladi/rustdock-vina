@@ -172,8 +172,54 @@ impl Molecule {
             let t = atom.atom_type;
             atom.is_hydrophobic =
                 t.is_potentially_hydrophobic() && !(t == AtomType::Carbon && bonded_to_hetero[i]);
-            atom.is_hbond_donor = t.is_hbond_acceptor() && bonded_to_polar_h[i];
+            atom.is_hbond_donor =
+                (t.is_nitrogen_or_oxygen() && bonded_to_polar_h[i]) || t.is_metal();
         }
+    }
+
+    /// The torsion count Vina divides affinity by, `num_tors`.
+    ///
+    /// Not the number of torsions: as in Vina's `conf_independent_inputs`,
+    /// each torsion bond counts half from each end, and only from an end
+    /// whose partner has more than one heavy neighbour. A torsion between two
+    /// non-terminal heavy atoms counts 1; one that only spins a terminal group
+    /// such as a methyl or hydroxyl counts 0.5.
+    pub fn vina_torsion_count(&self) -> f64 {
+        let n = self.atoms.len();
+        let mut heavy_neighbours = vec![0usize; n];
+        for bond in &self.bonds {
+            let (i, j) = (bond.atom1_idx, bond.atom2_idx);
+            if i >= n || j >= n {
+                continue;
+            }
+            if !self.atoms[j].atom_type.is_hydrogen() {
+                heavy_neighbours[i] += 1;
+            }
+            if !self.atoms[i].atom_type.is_hydrogen() {
+                heavy_neighbours[j] += 1;
+            }
+        }
+
+        let mut count = 0.0;
+        for torsion in &self.torsions {
+            let Some(bond) = self.bonds.get(torsion.bond_idx) else {
+                continue;
+            };
+            let (i, j) = (bond.atom1_idx, bond.atom2_idx);
+            if i >= n
+                || j >= n
+                || self.atoms[i].atom_type.is_hydrogen()
+                || self.atoms[j].atom_type.is_hydrogen()
+            {
+                continue;
+            }
+            for partner in [j, i] {
+                if heavy_neighbours[partner] > 1 {
+                    count += 0.5;
+                }
+            }
+        }
+        count
     }
 
     /// Atom index pairs that contribute to the intramolecular energy.
@@ -374,5 +420,98 @@ impl Molecule {
         }
 
         counts
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A molecule from (type, x) atoms on a line and explicit bonds, typed.
+    fn typed(atoms: &[AtomType], bonds: &[(usize, usize)]) -> Molecule {
+        let mut m = Molecule::new("test");
+        for (i, &t) in atoms.iter().enumerate() {
+            m.add_atom(Atom::new(
+                t,
+                Vector3::new(i as f64 * 1.5, 0.0, 0.0),
+                "X".to_string(),
+                i as u32 + 1,
+                "LIG".to_string(),
+                1,
+                'A',
+                0.0,
+            ));
+        }
+        for &(i, j) in bonds {
+            m.add_bond(i, j, false).unwrap();
+        }
+        m.assign_xs_types();
+        m
+    }
+
+    #[test]
+    fn test_any_nitrogen_or_oxygen_with_polar_h_is_a_donor() {
+        // An amide/amine nitrogen is type `N`, not `NA`, yet donates through
+        // its polar hydrogen (Vina `N_D`). This covers every backbone N-H.
+        let m = typed(
+            &[AtomType::Nitrogen, AtomType::HydrogenD, AtomType::Nitrogen],
+            &[(0, 1)],
+        );
+        assert!(m.atoms[0].is_hbond_donor);
+        assert!(!m.atoms[2].is_hbond_donor, "no polar hydrogen, no donor");
+    }
+
+    #[test]
+    fn test_metals_are_donors() {
+        let m = typed(&[AtomType::Zinc, AtomType::Sodium], &[]);
+        assert!(m.atoms.iter().all(|a| a.is_hbond_donor));
+    }
+
+    #[test]
+    fn test_carbon_bonded_to_halogen_or_metal_is_polar() {
+        let m = typed(
+            &[
+                AtomType::Carbon,
+                AtomType::Chlorine,
+                AtomType::Carbon,
+                AtomType::Zinc,
+                AtomType::Carbon,
+            ],
+            &[(0, 1), (2, 3), (4, 0)],
+        );
+        assert!(!m.atoms[0].is_hydrophobic, "C-Cl carbon is C_P");
+        assert!(
+            m.atoms[1].is_hydrophobic,
+            "the halogen itself stays hydrophobic"
+        );
+        assert!(!m.atoms[2].is_hydrophobic, "C-Zn carbon is C_P");
+        assert!(m.atoms[4].is_hydrophobic, "C bonded only to carbon is C_H");
+    }
+
+    #[test]
+    fn test_vina_torsion_count_halves_terminal_rotors() {
+        // C0-C1-C2-C3-O4: the C1-C2 torsion joins two non-terminal atoms and
+        // counts 1; C3-O4 only spins a terminal hydroxyl and counts 0.5.
+        let mut m = typed(&[AtomType::Carbon; 4], &[(0, 1), (1, 2), (2, 3)]);
+        m.add_atom(Atom::new(
+            AtomType::OxygenH,
+            Vector3::new(6.0, 0.0, 0.0),
+            "O".to_string(),
+            5,
+            "LIG".to_string(),
+            1,
+            'A',
+            0.0,
+        ));
+        m.add_bond(3, 4, true).unwrap();
+        for bond_idx in [1, 3] {
+            m.torsions.push(Torsion {
+                bond_idx,
+                moving_atoms: vec![],
+                angle: 0.0,
+            });
+        }
+        assert_eq!(m.torsions.len(), 2);
+        assert!((m.vina_torsion_count() - 1.5).abs() < 1e-12);
     }
 }
