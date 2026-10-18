@@ -184,6 +184,7 @@ impl MonteCarlo {
                 energy_components: vec![
                     ("Intermolecular".to_string(), inter),
                     ("Intramolecular".to_string(), intra),
+                    ("Unbound".to_string(), reference),
                 ],
                 rmsd: None,
             });

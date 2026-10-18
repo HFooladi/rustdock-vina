@@ -231,49 +231,25 @@ def model_coords(pdbqt: str) -> list[tuple[float | None, np.ndarray]]:
     return models
 
 
-def transplant(template: str, coords: np.ndarray) -> str:
-    """The template PDBQT with its atom coordinates replaced, in file order.
-
-    Used for rustdock's output, whose writer does not yet preserve Meeko's
-    REMARK SMILES / torsion-tree records: its atoms keep the input order, so
-    the input file supplies everything but the coordinates.
-    """
-    out, i = [], 0
-    for line in template.splitlines():
-        if ATOM_RE.match(line):
-            x, y, z = coords[i]
-            line = f"{line[:30]}{x:8.3f}{y:8.3f}{z:8.3f}{line[54:]}"
-            i += 1
-        out.append(line)
-    if i != len(coords):
-        raise ValueError(f"pose has {len(coords)} atoms, template {i}")
-    return "\n".join(out) + "\n"
-
-
 def pose_mols(tool: str, out: Path) -> list[tuple[float | None, Chem.Mol]]:
-    """Docked poses as RDKit molecules with bond orders, best first."""
+    """Docked poses as RDKit molecules with bond orders, best first.
+
+    Both programs' output is read the same way, with Meeko: it keeps the
+    ligand's REMARK SMILES and torsion tree, so the file alone rebuilds the
+    molecule.
+    """
     from meeko import PDBQTMolecule, RDKitMolCreate
 
     text = (out / f"{tool}_out.pdbqt").read_text()
     models = model_coords(text)
-    template = (out / "ligand_start.pdbqt").read_text()
+    mol = RDKitMolCreate.from_pdbqt_mol(PDBQTMolecule(text, skip_typing=True))[0]
     poses = []
-    for energy, coords in models:
-        if tool == "vina":
-            block = text  # Vina keeps Meeko's REMARKs; parse all models below
-            break
-        pdbqt_mol = PDBQTMolecule(transplant(template, coords), skip_typing=True)
-        mol = RDKitMolCreate.from_pdbqt_mol(pdbqt_mol)[0]
-        poses.append((energy, mol))
-    if tool == "vina" and models:
-        pdbqt_mol = PDBQTMolecule(block, skip_typing=True)
-        mol = RDKitMolCreate.from_pdbqt_mol(pdbqt_mol)[0]
-        for i, (energy, _) in enumerate(models):
-            single = Chem.Mol(mol, confId=mol.GetConformers()[i].GetId())
-            conf = Chem.Conformer(mol.GetConformers()[i])
-            single.RemoveAllConformers()
-            single.AddConformer(conf, assignId=True)
-            poses.append((energy, single))
+    for i, (energy, _) in enumerate(models):
+        single = Chem.Mol(mol)
+        conf = Chem.Conformer(mol.GetConformers()[i])
+        single.RemoveAllConformers()
+        single.AddConformer(conf, assignId=True)
+        poses.append((energy, single))
     return poses
 
 
@@ -300,6 +276,27 @@ def posebusters_valid(pose: Chem.Mol, out: Path) -> tuple[bool | None, str]:
     return not failed, ",".join(failed)
 
 
+def vina_scores_top_pose(out: Path) -> float | None:
+    """Vina's affinity for rustdock's top pose, read from rustdock's output.
+
+    Checks both that Vina can read the file and that rustdock reports the
+    affinity Vina would.
+    """
+    lines = (out / "rustdock_out.pdbqt").read_text().splitlines()
+    model = []
+    for line in lines[1:]:
+        if line.startswith("ENDMDL"):
+            break
+        model.append(line)
+    top = out / "_rustdock_top.pdbqt"
+    top.write_text("\n".join(model) + "\n")
+    proc = subprocess.run([str(VINA), "--receptor", str(out / "receptor.pdbqt"),
+                           "--ligand", str(top), "--score_only", "--autobox", "--cpu", "1"],
+                          capture_output=True, text=True)
+    m = re.search(r"Estimated Free Energy of Binding\s*:\s*(-?[\d.]+)", proc.stdout)
+    return float(m.group(1)) if m else None
+
+
 def evaluate(tool: str, out: Path, docked: dict) -> dict:
     row = {f"{tool}_seconds": docked["seconds"]}
     if not docked["ok"]:
@@ -321,6 +318,8 @@ def evaluate(tool: str, out: Path, docked: dict) -> dict:
         f"{tool}_pb_valid": valid,
         f"{tool}_pb_failed": failed,
     })
+    if tool == "rustdock":
+        row["rustdock_top_vina_score"] = vina_scores_top_pose(out)
     return row
 
 
@@ -373,6 +372,18 @@ def summarize(frame: pd.DataFrame, tool: str) -> dict:
     }
 
 
+def top_pose_check(frame: pd.DataFrame) -> str:
+    if "rustdock_top_vina_score" not in frame:
+        return "no complexes (not run)"
+    read = frame["rustdock_top_vina_score"].notna()
+    d = (frame["rustdock_affinity"] - frame["rustdock_top_vina_score"]).abs()[read]
+    text = f"{int(read.sum())}/{len(frame)} complexes"
+    if read.any():
+        text += (f"; its score differs from rustdock's reported affinity by median "
+                 f"{d.median():.3f}, max {d.max():.3f} kcal/mol")
+    return text
+
+
 def fmt(value, digits=2) -> str:
     if value is None or (isinstance(value, float) and np.isnan(value)):
         return "-"
@@ -417,6 +428,9 @@ def write_report(frame: pd.DataFrame, args: argparse.Namespace) -> None:
         "",
         f"- intermolecular energy (scoring function alone): {gap('inter')}",
         f"- affinity (with torsional normalization): {gap('affinity')}",
+        "",
+        "Output round trip: Vina read rustdock's top pose from its output file in "
+        + top_pose_check(frame) + ".",
         "",
         "| Code | Heavy | Rot | Vina RMSD | Rust RMSD | Vina best | Rust best | "
         "Vina aff | Rust aff | Xtal inter Vina | Xtal inter Rust | Vina PB | Rust PB | "
