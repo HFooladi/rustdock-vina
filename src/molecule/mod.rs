@@ -73,6 +73,15 @@ pub struct Molecule {
 
     /// Is this molecule rigid or has flexible parts?
     pub is_rigid: bool,
+
+    /// The PDBQT records the molecule was read from (one model, without
+    /// `MODEL`/`ENDMDL` or docking score remarks), in file order.
+    ///
+    /// The writer re-emits these with only the coordinates changed, so
+    /// everything rustdock does not model itself survives a round trip:
+    /// Meeko's `REMARK SMILES` lines, the `ROOT`/`BRANCH` torsion tree,
+    /// `TORSDOF`, atom names and charges. Empty for molecules built in code.
+    pub pdbqt_records: Vec<String>,
 }
 
 impl Molecule {
@@ -84,6 +93,7 @@ impl Molecule {
             bonds: Vec::new(),
             torsions: Vec::new(),
             is_rigid: true,
+            pdbqt_records: Vec::new(),
         }
     }
 

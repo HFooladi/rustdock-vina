@@ -57,6 +57,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pose is within 2 A of the crystal pose for 15/16 seeds.
 
 ### Fixed
+- PDBQT output now round-trips. Docking results are written in Vina's
+  layout (`MODEL n`, `REMARK VINA RESULT: affinity rmsd_lb rmsd_ub`, then
+  `INTER + INTRA`, `INTER`, `INTRA`, `UNBOUND`) followed by the ligand's own
+  records with only the coordinates changed, so Meeko's `REMARK SMILES`
+  lines, the `ROOT`/`BRANCH` tree, `TORSDOF`, atom names and charges survive.
+  Previously all of these were dropped and the atom columns were shifted. A
+  Meeko ligand written back unchanged is byte-identical; on the CASF pilot,
+  Meeko reads every rustdock output and Vina rescores rustdock's top pose
+  within 0.007 kcal/mol of the affinity rustdock reports. New
+  `Molecule::pdbqt_records` holds the records.
 - Vina scoring now matches AutoDock Vina 1.2.7 exactly. Rescoring the 29
   CASF-2016 pilot crystal poses, the median gap fell from 1.73 to 0.003
   kcal/mol (max 6.57 to 0.012), and pilot top-1 docking success rose from

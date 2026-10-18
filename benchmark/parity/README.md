@@ -50,6 +50,5 @@ Steps cache under `work/<code>/`, so a rerun resumes where it stopped.
 | Validity | PoseBusters `dock` config on the top pose |
 | Rescoring | Crystal pose scored by both: intermolecular energy (the scoring functions alone) and affinity |
 
-rustdock's output PDBQT does not yet keep Meeko's `REMARK SMILES` and torsion
-tree, so its poses are read by placing its coordinates, which keep the input
-atom order, into the input ligand file.
+Both programs' output PDBQT is read the same way, with Meeko, which rebuilds
+each pose's molecule from the `REMARK SMILES` lines the file carries.
