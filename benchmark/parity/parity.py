@@ -152,7 +152,7 @@ def prepare(code: str, entry: Path, out: Path) -> dict:
 # --------------------------------------------------------------------------
 
 
-def dock(tool: str, out: Path, meta: dict, cpu: int) -> dict:
+def dock(tool: str, out: Path, meta: dict, cpu: int, scoring: str) -> dict:
     result_path = out / f"{tool}_dock.json"
     if result_path.exists():
         return json.loads(result_path.read_text())
@@ -165,13 +165,14 @@ def dock(tool: str, out: Path, meta: dict, cpu: int) -> dict:
                "--center_x", str(c[0]), "--center_y", str(c[1]), "--center_z", str(c[2]),
                "--size_x", str(s[0]), "--size_y", str(s[1]), "--size_z", str(s[2]),
                "--exhaustiveness", str(EXHAUSTIVENESS), "--num_modes", str(NUM_MODES),
-               "--seed", str(SEED), "--cpu", str(cpu), "--out", str(poses)]
+               "--seed", str(SEED), "--cpu", str(cpu), "--scoring", scoring,
+               "--out", str(poses)]
     else:
         cmd = [str(RUSTDOCK), "dock", "--receptor", rec, "--ligand", lig,
                # `=` keeps a negative first coordinate from reading as a flag.
                "--center=" + ",".join(map(str, c)), "--size=" + ",".join(map(str, s)),
                "--exhaustiveness", str(EXHAUSTIVENESS), "--num-modes", str(NUM_MODES),
-               "--seed", str(SEED), "--out", str(poses)]
+               "--seed", str(SEED), "--scoring", scoring, "--out", str(poses)]
         env = {"RAYON_NUM_THREADS": str(cpu), "RUST_LOG": "warn",
                "PATH": "/usr/bin:/bin"}
     t0 = time.perf_counter()
@@ -184,7 +185,7 @@ def dock(tool: str, out: Path, meta: dict, cpu: int) -> dict:
     return result
 
 
-def rescore(tool: str, out: Path) -> dict:
+def rescore(tool: str, out: Path, scoring: str) -> dict:
     """Affinity and intermolecular energy the tool assigns to the crystal pose.
 
     Intermolecular energy compares the scoring functions alone; affinity also
@@ -193,11 +194,12 @@ def rescore(tool: str, out: Path) -> dict:
     rec, lig = str(out / "receptor.pdbqt"), str(out / "ligand_xtal.pdbqt")
     if tool == "vina":
         cmd = [str(VINA), "--receptor", rec, "--ligand", lig, "--score_only",
-               "--autobox", "--cpu", "1"]
+               "--autobox", "--cpu", "1", "--scoring", scoring]
         patterns = {"affinity": r"Estimated Free Energy of Binding\s*:\s*(-?[\d.]+)",
                     "inter": r"\(1\) Final Intermolecular Energy\s*:\s*(-?[\d.]+)"}
     else:
-        cmd = [str(RUSTDOCK), "score", "--receptor", rec, "--ligand", lig]
+        cmd = [str(RUSTDOCK), "score", "--receptor", rec, "--ligand", lig,
+               "--scoring", scoring]
         patterns = {"affinity": r"Affinity:\s*(-?[\d.]+)",
                     "inter": r"Intermolecular energy:\s*(-?[\d.]+)"}
     proc = subprocess.run(cmd, capture_output=True, text=True,
@@ -276,7 +278,7 @@ def posebusters_valid(pose: Chem.Mol, out: Path) -> tuple[bool | None, str]:
     return not failed, ",".join(failed)
 
 
-def vina_scores_top_pose(out: Path) -> float | None:
+def vina_scores_top_pose(out: Path, scoring: str) -> float | None:
     """Vina's affinity for rustdock's top pose, read from rustdock's output.
 
     Checks both that Vina can read the file and that rustdock reports the
@@ -291,13 +293,14 @@ def vina_scores_top_pose(out: Path) -> float | None:
     top = out / "_rustdock_top.pdbqt"
     top.write_text("\n".join(model) + "\n")
     proc = subprocess.run([str(VINA), "--receptor", str(out / "receptor.pdbqt"),
-                           "--ligand", str(top), "--score_only", "--autobox", "--cpu", "1"],
+                           "--ligand", str(top), "--score_only", "--autobox", "--cpu", "1",
+                           "--scoring", scoring],
                           capture_output=True, text=True)
     m = re.search(r"Estimated Free Energy of Binding\s*:\s*(-?[\d.]+)", proc.stdout)
     return float(m.group(1)) if m else None
 
 
-def evaluate(tool: str, out: Path, docked: dict) -> dict:
+def evaluate(tool: str, out: Path, docked: dict, scoring: str) -> dict:
     row = {f"{tool}_seconds": docked["seconds"]}
     if not docked["ok"]:
         row[f"{tool}_error"] = docked.get("error", "")[:200]
@@ -319,7 +322,7 @@ def evaluate(tool: str, out: Path, docked: dict) -> dict:
         f"{tool}_pb_failed": failed,
     })
     if tool == "rustdock":
-        row["rustdock_top_vina_score"] = vina_scores_top_pose(out)
+        row["rustdock_top_vina_score"] = vina_scores_top_pose(out, scoring)
     return row
 
 
@@ -341,8 +344,9 @@ def run(args: argparse.Namespace) -> None:
             meta = prepare(code, find_entry(args.pdbbind, code), out)
             row.update(heavy_atoms=meta["heavy_atoms"], rotatable_bonds=meta["rotatable_bonds"])
             for tool in ("vina", "rustdock"):
-                row.update(evaluate(tool, out, dock(tool, out, meta, args.cpu)))
-                row.update(rescore(tool, out))
+                docked = dock(tool, out, meta, args.cpu, args.scoring)
+                row.update(evaluate(tool, out, docked, args.scoring))
+                row.update(rescore(tool, out, args.scoring))
         except Exception as exc:  # noqa: BLE001 - one bad entry must not stop the run
             row["prep_error"] = str(exc)[:200]
         rows.append(row)
@@ -406,7 +410,7 @@ def write_report(frame: pd.DataFrame, args: argparse.Namespace) -> None:
         return (f"median {d.median():+.2f}, median |diff| {d.abs().median():.2f}, "
                 f"max |diff| {d.abs().max():.2f} kcal/mol")
     lines = [
-        "# Docking parity: rustdock-vina vs AutoDock Vina 1.2.7",
+        f"# Docking parity: rustdock-vina vs AutoDock Vina 1.2.7 ({args.scoring} scoring)",
         "",
         f"CASF-2016 core set, subset `{args.subset}` ({len(frame)} complexes). "
         f"Identical inputs for both: Meeko-prepared ligand from an RDKit conformer, "
@@ -459,7 +463,8 @@ def write_report(frame: pd.DataFrame, args: argparse.Namespace) -> None:
     if failures:
         lines += ["", "## PoseBusters failures (top pose)", ""]
         lines += [f"- `{code}` {tool}: {checks}" for code, tool, checks in failures]
-    report = args.report or (HERE / f"PARITY_{args.subset}.md")
+    suffix = "" if args.scoring == "vina" else f"_{args.scoring}"
+    report = args.report or (HERE / f"PARITY_{args.subset}{suffix}.md")
     report.write_text("\n".join(lines) + "\n")
     print(f"wrote {report}")
 
@@ -475,7 +480,9 @@ def main() -> None:
     for name, func in (("run", run), ("report", report)):
         p = sub.add_parser(name)
         p.set_defaults(func=func)
-        p.add_argument("--work", type=Path, default=HERE / "work")
+        p.add_argument("--work", type=Path,
+                       help="work directory (default: work, or work-<scoring>)")
+        p.add_argument("--scoring", choices=["vina", "vinardo"], default="vina")
         p.add_argument("--subset", choices=["pilot", "targets", "full"], default="pilot")
         p.add_argument("--cpu", type=int, default=16)
         p.add_argument("--report", type=Path)
@@ -483,6 +490,8 @@ def main() -> None:
                                     help="PDBbind root holding <group>/<code>/ entries")
     sub.choices["run"].add_argument("--codes", nargs="*", help="override the subset")
     args = parser.parse_args()
+    if args.work is None:
+        args.work = HERE / ("work" if args.scoring == "vina" else f"work-{args.scoring}")
     args.work.mkdir(parents=True, exist_ok=True)
     args.func(args)
 

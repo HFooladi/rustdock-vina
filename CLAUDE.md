@@ -48,6 +48,7 @@ src/
 ├── molecule/           # Molecule struct: atoms, bonds, torsions, geometric operations
 ├── forcefield/         # ForceField trait + implementations:
 │   ├── vina.rs         #   VinaForceField (gauss, repulsion, hydrophobic, H-bond terms)
+│   ├── vinardo.rs      #   VinardoForceField (Vinardo radii and terms, as in Vina 1.2.7)
 │   └── ad4.rs          #   AD4ForceField (AutoDock4 scoring)
 ├── scoring/            # VinaScore — high-level scoring combining forcefield terms
 ├── optimization/       # Optimizer trait + MonteCarlo implementation

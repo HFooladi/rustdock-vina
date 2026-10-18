@@ -1,4 +1,4 @@
-# Docking parity: rustdock-vina vs AutoDock Vina 1.2.7
+# Docking parity: rustdock-vina vs AutoDock Vina 1.2.7 (vina scoring)
 
 CASF-2016 core set, subset `pilot` (29 complexes). Identical inputs for both: Meeko-prepared ligand from an RDKit conformer, Open Babel receptor, box = crystal ligand extent + 10 A, exhaustiveness 8, 9 modes, seed 42, 16 CPUs. Success = top pose within 2 A heavy-atom RMSD (symmetry-aware) of the crystal ligand.
 

@@ -385,7 +385,9 @@ impl<'a> ExactField<'a> {
         forcefield: &'a dyn ForceField,
         search_box: SearchBox,
     ) -> Self {
-        let cutoff = crate::forcefield::vina::CUTOFF;
+        let cutoff = forcefield
+            .grid_cutoff()
+            .unwrap_or(crate::forcefield::vina::CUTOFF);
         let receptor: Vec<&Atom> = receptor
             .atoms
             .iter()

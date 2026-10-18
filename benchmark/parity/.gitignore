@@ -2,4 +2,5 @@
 .venv/
 bin/
 work/
+work-*/
 __pycache__/

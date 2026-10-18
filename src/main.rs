@@ -4,7 +4,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use log::{error, info, warn};
 use nalgebra::Vector3;
-use rustdock_vina::forcefield::{ad4::AD4ForceField, vina::VinaForceField, ForceField};
+use rustdock_vina::forcefield::{
+    ad4::AD4ForceField, vina::VinaForceField, vinardo::VinardoForceField, ForceField,
+};
 use rustdock_vina::io::{parse_pdbqt, write_docking_results};
 use rustdock_vina::optimization::monte_carlo::{MonteCarlo, MonteCarloParams};
 use rustdock_vina::optimization::Optimizer;
@@ -456,6 +458,7 @@ fn parse_config(config_str: &str) -> Result<(Vector3<f64>, Vector3<f64>)> {
 fn select_forcefield(name: &str) -> Result<Box<dyn ForceField>> {
     match name.to_lowercase().as_str() {
         "vina" => Ok(Box::new(VinaForceField::default())),
+        "vinardo" => Ok(Box::new(VinardoForceField::default())),
         "ad4" => {
             warn!(
                 "The AD4 scoring function is experimental and is not validated \
@@ -464,7 +467,7 @@ fn select_forcefield(name: &str) -> Result<Box<dyn ForceField>> {
             Ok(Box::new(AD4ForceField::default()))
         }
         other => Err(anyhow::anyhow!(
-            "unknown scoring function {other:?} (supported: vina, ad4)"
+            "unknown scoring function {other:?} (supported: vina, vinardo, ad4)"
         )),
     }
 }

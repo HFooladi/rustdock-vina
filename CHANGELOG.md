@@ -35,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `max_steps` the Monte Carlo steps per chain (`0` for Vina's default).
 
 ### Added
+- Vinardo scoring (`--scoring vinardo`, `VinardoForceField`), following
+  AutoDock Vina 1.2.7: Vina's typing and torsional term with Vinardo's radii,
+  one Gaussian, and its hydrophobic and H-bond ramps. On the CASF-2016 pilot
+  it rescores crystal poses within 0.02 kcal/mol of Vina's Vinardo and docks
+  19/29 top-1 (Vina: 18/29). The parity harness takes `--scoring vinardo`.
 - `benchmark/parity/`: a CASF-2016 docking parity harness against AutoDock
   Vina 1.2.7. Both programs dock identical Meeko/Open Babel-prepared inputs;
   the report gives top-1 success, symmetry-aware RMSD, PoseBusters validity,

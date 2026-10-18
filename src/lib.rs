@@ -68,6 +68,7 @@ use thiserror::Error;
 pub use atom::{Atom, AtomType};
 pub use forcefield::ad4::{AD4ForceField, AD4Params};
 pub use forcefield::vina::{VinaForceField, VinaParams};
+pub use forcefield::vinardo::{VinardoForceField, VinardoParams};
 pub use forcefield::{ForceField, ForceFieldError};
 pub use grid::{Grid, GridError, GridSet};
 pub use io::{parse_pdbqt, write_docking_results, write_pdbqt, IoError};
