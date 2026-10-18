@@ -18,8 +18,7 @@ fn bench_monte_carlo(c: &mut Criterion) {
     let forcefield = VinaForceField::new();
 
     let params = MonteCarloParams {
-        steps_without_improvement: 50,
-        use_local_optimization: false,
+        exhaustiveness: 2,
         ..MonteCarloParams::default()
     };
     let optimizer = MonteCarlo::with_params(params);

@@ -2,6 +2,7 @@
 
 pub mod local;
 pub mod monte_carlo;
+pub(crate) mod vina_search;
 
 use crate::forcefield::ForceField;
 use crate::molecule::Molecule;

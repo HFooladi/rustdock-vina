@@ -196,6 +196,83 @@ impl Grid {
         Ok((value, Vector3::new(d_dx, d_dy, d_dz) / self.spacing))
     }
 
+    /// Vina's grid evaluation (`grid::evaluate`): the interpolant at
+    /// `position` clamped into the grid, softened by Vina's `curl` with cap `cap`,
+    /// plus `slope` times the distance outside the grid along each axis.
+    ///
+    /// Returns the value and its gradient. Along an axis where the point is
+    /// outside, the gradient is the penalty's alone, pushing it back in.
+    pub fn evaluate_clamped(
+        &self,
+        position: &Vector3<f64>,
+        slope: f64,
+        cap: f64,
+    ) -> (f64, Vector3<f64>) {
+        let dims = [self.dimensions.x, self.dimensions.y, self.dimensions.z];
+        let mut s = [0.0; 3];
+        let mut cell = [0usize; 3];
+        let mut region = [0.0; 3];
+        let mut miss = 0.0;
+        for i in 0..3 {
+            let si = (position[i] - self.origin[i]) / self.spacing;
+            let last = (dims[i] - 1) as f64;
+            if si < 0.0 {
+                miss += -si;
+                region[i] = -1.0;
+                cell[i] = 0;
+                s[i] = 0.0;
+            } else if si >= last {
+                miss += si - last;
+                region[i] = 1.0;
+                cell[i] = dims[i] - 2;
+                s[i] = 1.0;
+            } else {
+                cell[i] = si as usize;
+                s[i] = si - cell[i] as f64;
+            }
+        }
+        let penalty = slope * miss * self.spacing;
+
+        let (ny, nz) = (dims[1], dims[2]);
+        let at = |x: usize, y: usize, z: usize| self.data[x * ny * nz + y * nz + z];
+        let [x0, y0, z0] = cell;
+        let (f000, f100) = (at(x0, y0, z0), at(x0 + 1, y0, z0));
+        let (f010, f110) = (at(x0, y0 + 1, z0), at(x0 + 1, y0 + 1, z0));
+        let (f001, f101) = (at(x0, y0, z0 + 1), at(x0 + 1, y0, z0 + 1));
+        let (f011, f111) = (at(x0, y0 + 1, z0 + 1), at(x0 + 1, y0 + 1, z0 + 1));
+        let [x, y, z] = s;
+        let (mx, my, mz) = (1.0 - x, 1.0 - y, 1.0 - z);
+
+        let mut f = f000 * mx * my * mz
+            + f100 * x * my * mz
+            + f010 * mx * y * mz
+            + f110 * x * y * mz
+            + f001 * mx * my * z
+            + f101 * x * my * z
+            + f011 * mx * y * z
+            + f111 * x * y * z;
+        let mut g = Vector3::new(
+            (f100 - f000) * my * mz
+                + (f110 - f010) * y * mz
+                + (f101 - f001) * my * z
+                + (f111 - f011) * y * z,
+            (f010 - f000) * mx * mz
+                + (f110 - f100) * x * mz
+                + (f011 - f001) * mx * z
+                + (f111 - f101) * x * z,
+            (f001 - f000) * mx * my
+                + (f101 - f100) * x * my
+                + (f011 - f010) * mx * y
+                + (f111 - f110) * x * y,
+        );
+        curl(&mut f, &mut g, cap);
+        for i in 0..3 {
+            let inside = if region[i] == 0.0 { g[i] } else { 0.0 };
+            g[i] = inside / self.spacing + slope * region[i];
+        }
+        (f + penalty, g)
+    }
+
     /// Load a grid from an AutoDock map file
     pub fn from_file<P: AsRef<Path>>(_path: P, _atom_type: AtomType) -> Result<Self, GridError> {
         // This would normally parse AutoDock map files
@@ -275,9 +352,11 @@ impl GridSet {
             )));
         }
 
-        let half = box_size * 0.5 + Vector3::repeat(margin);
-        let origin = center - half;
-        let dimensions = (half * 2.0).map(|extent| (extent / spacing).ceil() as usize + 1);
+        // As Vina: a whole number of cells spanning the box, centred on it.
+        let cells = (box_size + Vector3::repeat(2.0 * margin))
+            .map(|extent| ((extent / spacing).ceil() as usize).max(1));
+        let origin = center - cells.map(|n| n as f64 * spacing) * 0.5;
+        let dimensions = cells.map(|n| n + 1);
 
         let mut probes: Vec<Atom> = Vec::new();
         let mut keys: Vec<ProbeKey> = Vec::new();
@@ -329,6 +408,30 @@ impl GridSet {
         self.grids.is_empty()
     }
 
+    /// Vina's search energy (`cache::eval_deriv`) of ligand atoms at
+    /// `coords`, adding each atom's gradient into `grads`.
+    ///
+    /// Every atom is evaluated on its grid with [`Grid::evaluate_clamped`]:
+    /// an atom outside the grid is charged `slope` per Angstrom, which is how
+    /// Vina confines the whole ligand to the search box. `cap` softens each
+    /// atom's positive energy (see [`curl`]).
+    pub(crate) fn search_energy(
+        &self,
+        coords: &[Vector3<f64>],
+        slope: f64,
+        cap: f64,
+        grads: &mut [Vector3<f64>],
+    ) -> f64 {
+        let mut total = 0.0;
+        for ((p, grid), grad) in coords.iter().zip(&self.atom_grid).zip(grads) {
+            let Some(g) = grid else { continue };
+            let (e, d) = self.grids[*g].evaluate_clamped(p, slope, cap);
+            total += e;
+            *grad += d;
+        }
+        total
+    }
+
     /// Ligand-receptor interaction energy of `ligand`, which must have the
     /// same atoms in the same order as the ligand the set was built for.
     pub fn energy(
@@ -366,6 +469,19 @@ impl GridSet {
             *grad += gradient;
         }
         Ok(total)
+    }
+}
+
+/// Vina's `curl`: soften a positive energy `e` with cap `v` to
+/// `e * v / (v + e)`, scaling its derivative by the square of that factor.
+///
+/// It keeps clashes from dominating the search: a pose with one bad contact
+/// is penalized but not driven off a cliff. Negative energies pass unchanged.
+pub(crate) fn curl(e: &mut f64, deriv: &mut Vector3<f64>, v: f64) {
+    if *e > 0.0 && v.is_finite() {
+        let factor = if v < f64::EPSILON { 0.0 } else { v / (v + *e) };
+        *e *= factor;
+        *deriv *= factor * factor;
     }
 }
 

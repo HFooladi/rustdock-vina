@@ -51,7 +51,8 @@ src/
 │   └── ad4.rs          #   AD4ForceField (AutoDock4 scoring)
 ├── scoring/            # VinaScore — high-level scoring combining forcefield terms
 ├── optimization/       # Optimizer trait + MonteCarlo implementation
-│   └── monte_carlo.rs  #   Pose generation and BFGS-like optimization
+│   ├── monte_carlo.rs  #   MonteCarlo optimizer: sets up the search, builds DockingResults
+│   └── vina_search.rs  #   Port of Vina 1.2.7's search (chains, mutation, BFGS, clustering)
 ├── grid/               # Spatial grid for efficient energy lookup
 ├── io/                 # PDBQT parser (parse_pdbqt) and writer (write_docking_results)
 ├── math/               # Vector/matrix utilities, coordinate transforms
