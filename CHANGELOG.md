@@ -59,6 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--scoring ad4` warns that it is experimental and unvalidated.
 - The local optimizer rotates about the entry pose's centroid rather than the
   current one, so rotation and torsion derivatives decouple.
+- Affinity grids are built ~5x faster (1IEP: 169 ms to 31 ms; a 1-run dock
+  0.5 s to 0.2 s). Pair energies come from radial tables per receptor/ligand
+  class, as in Vina's precalculation, and all ligand classes are filled in one
+  sweep that only visits receptor atoms within the cutoff. Grid values match
+  exact scoring to ~2e-4 relative.
 
 ### Removed
 - Placeholder `Molecule::calculate_internal_energy` (a bare inverse-distance
