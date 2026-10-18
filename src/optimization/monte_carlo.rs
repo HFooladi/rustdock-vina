@@ -1,68 +1,56 @@
-//! Monte Carlo search algorithm for molecular docking
+//! Monte Carlo search for molecular docking: AutoDock Vina's algorithm.
+//!
+//! The search itself, a port of Vina 1.2.7's, lives in the private
+//! `vina_search` module; this module sets it up and turns its poses into
+//! [`DockingResult`]s.
 
-use nalgebra::{Unit, UnitQuaternion, Vector3};
+use nalgebra::Vector3;
 use rand::prelude::*;
-use rand::rngs::StdRng;
-use rayon::prelude::*;
-use std::f64::consts::PI;
 
 use crate::forcefield::ForceField;
 use crate::grid::{pairwise_energy_and_gradient, GridSet};
 use crate::molecule::Molecule;
-use crate::optimization::local::{LocalOptimizer, LocalOptimizerParams};
+use crate::optimization::vina_search::{
+    vina_global_steps, vina_local_steps, ExactField, GridField, InterField, SearchBox,
+    SearchSettings, Searcher,
+};
 use crate::optimization::{DockingResult, OptimizationError, Optimizer};
 
-/// Parameters for Monte Carlo search
+/// Parameters for the Monte Carlo search. Defaults are Vina's.
 #[derive(Debug, Clone)]
 pub struct MonteCarloParams {
-    /// Temperature parameter for Metropolis criterion
+    /// Independent Monte Carlo chains, run in parallel (Vina's
+    /// `exhaustiveness`).
+    pub exhaustiveness: usize,
+
+    /// Metropolis temperature, in kcal/mol (Vina: 1.2).
     pub temperature: f64,
 
-    /// Probability of performing a translation move
-    pub prob_translation: f64,
+    /// Size of one mutation: Angstroms of translation, and the rotation that
+    /// moves a typical atom about as far (Vina: 2).
+    pub mutation_amplitude: f64,
 
-    /// Probability of performing a rotation move
-    pub prob_rotation: f64,
+    /// Cap that softens clashes while the search explores (Vina's
+    /// `hunt_cap`: 10). Positive energies `e` count as `e * cap / (cap + e)`.
+    pub hunt_cap: f64,
 
-    /// Probability of performing a torsion move
-    pub prob_torsion: f64,
+    /// Minimum heavy-atom RMSD between reported modes, in Angstroms
+    /// (Vina's `--min_rmsd`: 1).
+    pub min_rmsd: f64,
 
-    /// Maximum translation step (in Angstroms)
-    pub max_translation: f64,
+    /// BFGS steps per local optimization; `None` uses Vina's
+    /// `(25 + atoms) / 3`.
+    pub local_steps: Option<usize>,
 
-    /// Maximum rotation step (in radians)
-    pub max_rotation: f64,
-
-    /// Maximum torsion step (in radians)
-    pub max_torsion: f64,
-
-    /// Number of steps without improvement before stopping
-    pub steps_without_improvement: usize,
-
-    /// Whether to use local optimization (BFGS) to refine poses
-    pub use_local_optimization: bool,
-
-    /// Whether each run starts from a random placement inside the search box.
-    ///
-    /// This is what makes the search global. Disable it only to refine a pose
-    /// you already have (the equivalent of Vina's `--local_only`); with it off,
-    /// docking a ligand that starts far from the site will not find the site.
+    /// Whether each chain starts from a random pose in the box. Disable only
+    /// to refine a pose you already have.
     pub randomize_initial_pose: bool,
-
-    /// Iterations of local minimization applied to each Monte Carlo proposal
-    /// before the Metropolis test.
-    ///
-    /// Kept short because it runs on every step; the winning pose gets a
-    /// full-length minimization at the end.
-    pub refine_iterations: usize,
 
     /// Optional master RNG seed for reproducible runs.
     ///
-    /// `None` (the default) draws fresh entropy from the OS, so each run
-    /// produces different poses. `Some(seed)` makes [`MonteCarlo::optimize`]
-    /// fully deterministic; [`MonteCarlo::generate_poses`] derives a distinct
-    /// per-pose seed from the master seed so the parallel pose set is also
-    /// reproducible.
+    /// `None` (the default) draws fresh entropy. `Some(seed)` makes the
+    /// search fully deterministic: each chain's seed is mixed from the master
+    /// seed and the chain index.
     pub seed: Option<u64>,
 
     /// Score ligand-receptor energy from precomputed grids during the search.
@@ -80,17 +68,13 @@ pub struct MonteCarloParams {
 impl Default for MonteCarloParams {
     fn default() -> Self {
         Self {
-            temperature: 1.2, // Vina's value; 0.3 froze the walk into its first basin
-            prob_translation: 0.5,
-            prob_rotation: 0.3,
-            prob_torsion: 0.2,
-            max_translation: 2.0,
-            max_rotation: PI / 3.0, // 60 degrees
-            max_torsion: PI / 3.0,  // 60 degrees
-            steps_without_improvement: 1000,
-            use_local_optimization: true, // Enable local optimization by default
+            exhaustiveness: 8,
+            temperature: 1.2,
+            mutation_amplitude: 2.0,
+            hunt_cap: 10.0,
+            min_rmsd: 1.0,
+            local_steps: None,
             randomize_initial_pose: true,
-            refine_iterations: 12,
             seed: None,
             use_grid: true,
             grid_spacing: 0.375,
@@ -115,242 +99,102 @@ impl MonteCarlo {
         Self { params }
     }
 
-    /// Generate a random translation within the search box
-    fn random_translation(&self, rng: &mut StdRng) -> Vector3<f64> {
-        let dx = (rng.gen::<f64>() - 0.5) * 2.0 * self.params.max_translation;
-        let dy = (rng.gen::<f64>() - 0.5) * 2.0 * self.params.max_translation;
-        let dz = (rng.gen::<f64>() - 0.5) * 2.0 * self.params.max_translation;
-
-        Vector3::new(dx, dy, dz)
+    /// Vina's Monte Carlo step count per chain for `ligand`:
+    /// `70 * 3 * (50 + atoms + 10 * (6 + torsions)) / 2`.
+    pub fn default_steps(ligand: &Molecule) -> usize {
+        vina_global_steps(ligand)
     }
 
-    /// Generate a random rotation of bounded magnitude about a uniformly
-    /// distributed axis.
-    fn random_rotation(&self, rng: &mut StdRng) -> UnitQuaternion<f64> {
-        let angle = (rng.gen::<f64>() - 0.5) * 2.0 * self.params.max_rotation;
-        UnitQuaternion::from_axis_angle(&random_axis(rng), angle)
-    }
-
-    /// Place the ligand at a uniformly random position and orientation in the
-    /// box, with all torsions randomized.
-    ///
-    /// Placement targets the centroid, so this always succeeds — no rejection
-    /// loop and no fallback to the input pose, which would quietly reintroduce
-    /// a dependence on where the caller happened to put the ligand.
-    fn random_pose_in_box(
-        &self,
-        ligand: &Molecule,
-        center: &Vector3<f64>,
-        box_size: &Vector3<f64>,
-        rng: &mut StdRng,
-    ) -> Molecule {
-        let mut candidate = ligand.clone();
-
-        for i in 0..candidate.torsions.len() {
-            let angle = (rng.gen::<f64>() - 0.5) * 2.0 * PI;
-            let _ = candidate.rotate_torsion(i, angle);
-        }
-
-        candidate.rotate_about_center(&random_orientation(rng));
-
-        let Ok(current_center) = candidate.center() else {
-            return ligand.clone();
-        };
-        let half = box_size * 0.5;
-        let target = Vector3::new(
-            center.x + (rng.gen::<f64>() - 0.5) * 2.0 * half.x,
-            center.y + (rng.gen::<f64>() - 0.5) * 2.0 * half.y,
-            center.z + (rng.gen::<f64>() - 0.5) * 2.0 * half.z,
-        );
-        candidate.translate(&(target - current_center));
-
-        candidate
-    }
-
-    /// The quantity the search minimizes: receptor interaction plus the
-    /// ligand's own internal energy, so that torsional moves cannot buy
-    /// receptor contacts by folding the ligand into itself.
-    fn objective(
-        &self,
-        ligand: &Molecule,
-        inter: InterModel,
-        forcefield: &dyn ForceField,
-        intra_pairs: &[(usize, usize)],
-    ) -> Result<f64, OptimizationError> {
-        Ok(inter.energy(ligand, forcefield)?
-            + intramolecular_energy(ligand, intra_pairs, forcefield)?)
-    }
-
-    /// Build the search grids for this ligand and box, if enabled and the
-    /// force field allows it.
-    ///
-    /// The grid spans the box widened by the ligand's radius, the furthest an
-    /// atom can sit from a centroid confined to the box (barring torsional
-    /// extension, which the exact fallback in [`GridSet`] covers).
-    fn build_grids(
-        &self,
-        ligand: &Molecule,
-        receptor: &Molecule,
-        forcefield: &dyn ForceField,
-        center: &Vector3<f64>,
-        box_size: &Vector3<f64>,
-    ) -> Result<Option<GridSet>, OptimizationError> {
-        if !self.params.use_grid {
-            return Ok(None);
-        }
-        Ok(GridSet::build(
-            ligand,
-            receptor,
-            forcefield,
-            center,
-            box_size,
-            ligand_radius(ligand),
-            self.params.grid_spacing,
-        )?)
-    }
-
-    /// One Monte Carlo run, searching on `grids` when given and on exact
-    /// pairwise energy otherwise.
+    /// Dock `ligand`: up to `num_modes` distinct poses, best first, from
+    /// `steps` Monte Carlo steps per chain (`0` for Vina's default).
     #[allow(clippy::too_many_arguments)]
-    fn run(
+    fn dock(
         &self,
         ligand: &Molecule,
         receptor: &Molecule,
-        grids: Option<&GridSet>,
         forcefield: &dyn ForceField,
         center: Vector3<f64>,
         box_size: Vector3<f64>,
-        max_steps: usize,
-    ) -> Result<DockingResult, OptimizationError> {
-        let inter = InterModel { receptor, grids };
-        let mut rng = match self.params.seed {
-            Some(s) => StdRng::seed_from_u64(s),
-            None => StdRng::from_entropy(),
-        };
-        // Start each run from a random placement inside the box rather than
-        // from the input coordinates. Without this every replica explores the
-        // same basin, "exhaustiveness" buys almost nothing, and a ligand handed
-        // in at its answer is simply handed back.
-        let mut current_molecule = if self.params.randomize_initial_pose {
-            self.random_pose_in_box(ligand, &center, &box_size, &mut rng)
-        } else {
-            ligand.clone()
-        };
-
-        // Topology-derived, so computed once and reused for every evaluation.
-        let intra_pairs = ligand.intramolecular_pairs();
-
-        // Calculate initial energy
-        let mut current_energy =
-            self.objective(&current_molecule, inter, forcefield, &intra_pairs)?;
-        let mut best_energy = current_energy;
-        let mut best_molecule = current_molecule.clone();
-
-        let mut steps_since_improvement = 0;
-
-        // Vina's basin-hopping: perturb, minimize, then apply the Metropolis
-        // test to the *minimized* energy. Testing the raw perturbed energy
-        // instead makes the walk hop between unrelaxed configurations and
-        // wastes most proposals, because almost any random nudge raises the
-        // energy before relaxation has a chance to recover it.
-        let refiner = LocalOptimizer::with_params(LocalOptimizerParams {
-            max_iterations: self.params.refine_iterations,
-            ..LocalOptimizerParams::default()
-        });
-        let bounds = Some((&center, &box_size));
-
-        for _step in 0..max_steps {
-            // Create a copy of the current state
-            let mut new_molecule = current_molecule.clone();
-
-            // Perturb every degree of freedom at once, as Vina does, rather
-            // than picking a single one per step.
-            new_molecule.translate(&self.random_translation(&mut rng));
-            new_molecule.rotate_about_center(&self.random_rotation(&mut rng));
-            for i in 0..new_molecule.torsions.len() {
-                let delta = (rng.gen::<f64>() - 0.5) * 2.0 * self.params.max_torsion;
-                let _ = new_molecule.rotate_torsion(i, delta);
-            }
-
-            // Check if the molecule is still within the search box
-            if !new_molecule.center_within_box(&center, &box_size) {
-                continue;
-            }
-
-            let new_energy = if self.params.use_local_optimization {
-                refiner
-                    .minimize_with_model(&mut new_molecule, inter, forcefield, bounds, &intra_pairs)
-                    .unwrap_or(f64::INFINITY)
-            } else {
-                self.objective(&new_molecule, inter, forcefield, &intra_pairs)?
-            };
-
-            // Decide whether to accept the move (Metropolis criterion)
-            let accept = if new_energy <= current_energy {
-                true
-            } else {
-                let boltzmann_factor =
-                    ((current_energy - new_energy) / self.params.temperature).exp();
-                rng.gen::<f64>() < boltzmann_factor
-            };
-
-            if accept {
-                current_molecule = new_molecule;
-                current_energy = new_energy;
-
-                // Check if this is a new best solution
-                if new_energy < best_energy {
-                    best_energy = new_energy;
-                    best_molecule = current_molecule.clone();
-                    steps_since_improvement = 0;
-                } else {
-                    steps_since_improvement += 1;
-                }
-            } else {
-                steps_since_improvement += 1;
-            }
-
-            // Check termination criteria
-            if steps_since_improvement >= self.params.steps_without_improvement {
-                break;
-            }
-        }
-
-        // Polish the winner with a full-length minimization; the in-loop one is
-        // deliberately truncated for speed. Like Vina's final refinement, this
-        // runs on exact energies: grid interpolation undersamples the narrow
-        // attractive wells, which matters most in exactly the tight contacts a
-        // good pose has.
-        if self.params.use_local_optimization {
-            let local_optimizer = LocalOptimizer::new();
-            // Only the pose is kept; its energies are rescored exactly below.
-            let _ = local_optimizer.minimize_with_model(
-                &mut best_molecule,
-                InterModel::exact(receptor),
+        num_modes: usize,
+        steps: usize,
+    ) -> Result<Vec<DockingResult>, OptimizationError> {
+        // Receptor atoms too far from the box can never interact with any
+        // pose inside it, so drop them once.
+        let pruned = prune_receptor(receptor, &center, &box_size, ligand);
+        let search_box = SearchBox::new(&center, &box_size, self.params.grid_spacing);
+        let grids = if self.params.use_grid {
+            GridSet::build(
+                ligand,
+                &pruned,
                 forcefield,
-                bounds,
-                &intra_pairs,
-            );
+                &center,
+                &box_size,
+                0.0,
+                self.params.grid_spacing,
+            )?
+        } else {
+            None
+        };
+        let exact = ExactField::new(&pruned, forcefield, search_box);
+        let grid_field = grids.as_ref().map(GridField);
+        let field: &dyn InterField = match &grid_field {
+            Some(g) => g,
+            None => &exact,
+        };
+
+        let searcher = Searcher::new(ligand, forcefield, search_box)?;
+        let settings = SearchSettings {
+            chains: self.params.exhaustiveness.max(1),
+            global_steps: if steps == 0 {
+                vina_global_steps(ligand)
+            } else {
+                steps
+            },
+            local_steps: self
+                .params
+                .local_steps
+                .unwrap_or_else(|| vina_local_steps(ligand)),
+            num_saved: num_modes.max(1),
+            min_rmsd: self.params.min_rmsd,
+            temperature: self.params.temperature,
+            mutation_amplitude: self.params.mutation_amplitude,
+            hunt_cap: self.params.hunt_cap,
+            randomize: self.params.randomize_initial_pose,
+        };
+        // Each chain's seed is mixed from (master, chain index), so the set
+        // of chains is reproducible and no two master seeds share chains.
+        let master = self.params.seed.unwrap_or_else(|| rand::thread_rng().gen());
+        let poses = searcher.search(field, &exact, &settings, |i| run_seed(master, i as u64))?;
+
+        // As Vina reports a mode: its intermolecular energy plus its internal
+        // energy relative to the best mode's, which stands in for the
+        // unbound ligand. The best mode's value is therefore its
+        // intermolecular energy alone.
+        let mut results = Vec::with_capacity(poses.len());
+        let mut best_intra = None;
+        for pose in &poses {
+            let coords = searcher.coords_of(&pose.conf);
+            let molecule = searcher.model.to_molecule(ligand, &pose.conf, &coords);
+            let inter = intermolecular_energy(&molecule, &pruned, forcefield)?;
+            let intra = searcher.intra_energy(&coords)?;
+            let reference = *best_intra.get_or_insert(intra);
+            results.push(DockingResult {
+                energy: inter + intra - reference,
+                molecule,
+                energy_components: vec![
+                    ("Intermolecular".to_string(), inter),
+                    ("Intramolecular".to_string(), intra),
+                ],
+                rmsd: None,
+            });
         }
 
-        // The search minimizes inter + intra, but Vina reports the affinity
-        // from the intermolecular term alone: the ligand's internal energy
-        // cancels against the unbound reference state. Rescore exactly so
-        // grid interpolation error never reaches the reported numbers.
-        let inter_energy = intermolecular_energy(&best_molecule, receptor, forcefield)?;
-        let intra_energy = intramolecular_energy(&best_molecule, &intra_pairs, forcefield)?;
-
-        let energy_components = vec![
-            ("Intermolecular".to_string(), inter_energy),
-            ("Intramolecular".to_string(), intra_energy),
-        ];
-
-        Ok(DockingResult {
-            energy: inter_energy,
-            molecule: best_molecule,
-            energy_components,
-            rmsd: None,
-        })
+        if let Some((first, rest)) = results.split_first_mut() {
+            for result in rest {
+                result.rmsd = Some(calculate_rmsd(&result.molecule, &first.molecule));
+            }
+        }
+        Ok(results)
     }
 }
 
@@ -478,6 +322,8 @@ pub(crate) fn intramolecular_energy_and_gradients(
 }
 
 impl Optimizer for MonteCarlo {
+    /// The single best pose from a full search; `max_steps` is Monte Carlo
+    /// steps per chain (`0` for Vina's default).
     fn optimize(
         &self,
         ligand: &Molecule,
@@ -487,18 +333,14 @@ impl Optimizer for MonteCarlo {
         box_size: Vector3<f64>,
         max_steps: usize,
     ) -> Result<DockingResult, OptimizationError> {
-        let grids = self.build_grids(ligand, receptor, forcefield, &center, &box_size)?;
-        self.run(
-            ligand,
-            receptor,
-            grids.as_ref(),
-            forcefield,
-            center,
-            box_size,
-            max_steps,
-        )
+        self.dock(ligand, receptor, forcefield, center, box_size, 1, max_steps)?
+            .into_iter()
+            .next()
+            .ok_or(OptimizationError::FailedToConverge)
     }
 
+    /// Up to `num_poses` distinct binding modes, best first; `max_steps` is
+    /// Monte Carlo steps per chain (`0` for Vina's default).
     fn generate_poses(
         &self,
         ligand: &Molecule,
@@ -509,76 +351,11 @@ impl Optimizer for MonteCarlo {
         num_poses: usize,
         max_steps: usize,
     ) -> Result<Vec<DockingResult>, OptimizationError> {
-        // Receptor atoms too far from the box can never interact with any pose
-        // inside it, so drop them once instead of testing them on every one of
-        // the millions of energy evaluations to come.
-        let pruned = prune_receptor(receptor, &center, &box_size, ligand);
-
-        // One set of grids serves every run.
-        let grids = self.build_grids(ligand, &pruned, forcefield, &center, &box_size)?;
-
-        // Generate poses in parallel using rayon. If a master seed is set, each
-        // run gets its own seed mixed from (master, run index), so the parallel
-        // pose set stays reproducible and no two master seeds share runs.
-        let master_seed = self.params.seed;
-        let results: Result<Vec<DockingResult>, OptimizationError> = (0..num_poses)
-            .into_par_iter()
-            .map(|i| {
-                let per_pose = MonteCarlo::with_params(MonteCarloParams {
-                    seed: master_seed.map(|s| run_seed(s, i as u64)),
-                    ..self.params.clone()
-                });
-                per_pose.run(
-                    ligand,
-                    &pruned,
-                    grids.as_ref(),
-                    forcefield,
-                    center,
-                    box_size,
-                    max_steps,
-                )
-            })
-            .collect();
-
-        let mut results = results?;
-
-        // Sort by energy
-        results.sort_by(|a, b| a.energy.partial_cmp(&b.energy).unwrap());
-
-        // Collapse near-identical poses. The runs are independent, so many of
-        // them land in the same minimum; without this, "9 binding modes" can be
-        // nine copies of one pose.
-        let mut clustered: Vec<DockingResult> = Vec::new();
-        for result in results {
-            let duplicate = clustered
-                .iter()
-                .any(|kept| calculate_rmsd(&result.molecule, &kept.molecule) < MODE_RMSD_THRESHOLD);
-            if !duplicate {
-                clustered.push(result);
-            }
-        }
-        let mut results = clustered;
-
-        // Calculate RMSD to best pose
-        if !results.is_empty() {
-            let (first, rest) = results.split_at_mut(1);
-            let best_molecule = &first[0].molecule;
-
-            for result in rest {
-                let rmsd = calculate_rmsd(&result.molecule, best_molecule);
-                result.rmsd = Some(rmsd);
-            }
-        }
-
-        Ok(results)
+        self.dock(
+            ligand, receptor, forcefield, center, box_size, num_poses, max_steps,
+        )
     }
 }
-
-/// Minimum RMSD between two reported binding modes, in Angstroms.
-///
-/// Vina uses the same idea: modes closer than this are the same answer found
-/// twice, not two distinct hypotheses.
-const MODE_RMSD_THRESHOLD: f64 = 1.0;
 
 /// Drop receptor atoms that cannot reach any ligand pose placed in the box.
 ///
@@ -640,30 +417,6 @@ fn ligand_radius(ligand: &Molecule) -> f64 {
                 .fold(0.0, f64::max)
         })
         .unwrap_or(0.0)
-}
-
-/// Sample a rotation axis uniformly over the sphere.
-///
-/// Sampling the components from a cube and normalizing would bias the axis
-/// toward the eight corners; rejection sampling on the unit ball does not.
-fn random_axis(rng: &mut StdRng) -> Unit<Vector3<f64>> {
-    for _ in 0..32 {
-        let v = Vector3::new(
-            rng.gen::<f64>() * 2.0 - 1.0,
-            rng.gen::<f64>() * 2.0 - 1.0,
-            rng.gen::<f64>() * 2.0 - 1.0,
-        );
-        let norm_sq = v.norm_squared();
-        if norm_sq > 1e-12 && norm_sq <= 1.0 {
-            return Unit::new_normalize(v);
-        }
-    }
-    Unit::new_unchecked(Vector3::new(0.0, 0.0, 1.0))
-}
-
-/// Sample a uniformly random orientation.
-fn random_orientation(rng: &mut StdRng) -> UnitQuaternion<f64> {
-    UnitQuaternion::from_axis_angle(&random_axis(rng), (rng.gen::<f64>() - 0.5) * 2.0 * PI)
 }
 
 /// Calculate root mean square deviation between two molecules

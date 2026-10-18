@@ -86,8 +86,7 @@ fn test_monte_carlo_optimization() {
 
     // Create optimizer with fewer iterations for faster testing
     let params = MonteCarloParams {
-        steps_without_improvement: 100,
-        use_local_optimization: false, // Disable for faster testing
+        exhaustiveness: 2,
         ..MonteCarloParams::default()
     };
     let optimizer = MonteCarlo::with_params(params);
@@ -122,8 +121,8 @@ fn test_generate_multiple_poses() {
     let forcefield = VinaForceField::default();
 
     let params = MonteCarloParams {
-        steps_without_improvement: 50,
-        use_local_optimization: false,
+        exhaustiveness: 2,
+        seed: Some(11),
         ..MonteCarloParams::default()
     };
     let optimizer = MonteCarlo::with_params(params);
@@ -175,8 +174,7 @@ fn test_write_docking_results() {
     let forcefield = VinaForceField::default();
 
     let params = MonteCarloParams {
-        steps_without_improvement: 50,
-        use_local_optimization: false,
+        exhaustiveness: 2,
         ..MonteCarloParams::default()
     };
     let optimizer = MonteCarlo::with_params(params);
@@ -257,8 +255,7 @@ fn test_monte_carlo_seed_is_deterministic() {
     let forcefield = VinaForceField::default();
 
     let params = MonteCarloParams {
-        steps_without_improvement: 50,
-        use_local_optimization: false,
+        exhaustiveness: 2,
         seed: Some(42),
         ..MonteCarloParams::default()
     };
@@ -295,8 +292,7 @@ fn test_generate_poses_seed_is_deterministic() {
     let forcefield = VinaForceField::default();
 
     let params = MonteCarloParams {
-        steps_without_improvement: 50,
-        use_local_optimization: false,
+        exhaustiveness: 2,
         seed: Some(7),
         ..MonteCarloParams::default()
     };

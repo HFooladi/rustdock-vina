@@ -214,6 +214,7 @@ fn main() -> Result<()> {
                 ));
             }
             let optimizer = MonteCarlo::with_params(MonteCarloParams {
+                exhaustiveness,
                 use_grid: !no_grid,
                 grid_spacing,
                 seed,
@@ -250,8 +251,8 @@ fn main() -> Result<()> {
                     forcefield.as_ref(),
                     center,
                     box_size,
-                    num_modes * exhaustiveness, // Generate more poses initially
-                    mc_steps(&ligand_molecule),
+                    num_modes,
+                    0, // Vina's step count for this ligand
                 )?;
 
                 // Apply the force field's torsional normalization (Vina:
@@ -445,16 +446,6 @@ fn parse_config(config_str: &str) -> Result<(Vector3<f64>, Vector3<f64>)> {
             "Missing configuration values for center or box size"
         )),
     }
-}
-
-/// Monte Carlo steps to run per pose.
-///
-/// Each step now includes a local minimization, so far fewer steps are needed
-/// than when a step was a single energy evaluation. Scaled by the ligand's
-/// degrees of freedom, following Vina's heuristic.
-fn mc_steps(ligand: &rustdock_vina::Molecule) -> usize {
-    let dof = 6 + ligand.torsions.len();
-    (8 * dof).clamp(50, 300)
 }
 
 /// Resolve the `--scoring` flag to a force field.

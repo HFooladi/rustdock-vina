@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- The docking search is now a port of AutoDock Vina 1.2.7's
+  (`optimization::vina_search`). On the 29-complex CASF-2016 pilot, top-1
+  success rose from 11/29 to 15/29 (Vina: 16/29), any-mode success from
+  16/29 to 26/29 (Vina: 24/29), and the median top-1 RMSD fell from 3.94 to
+  1.34 A (Vina: 1.31), at 0.72x Vina's total wall time. As in Vina:
+  - `exhaustiveness` independent Monte Carlo chains, each running
+    `70 * 3 * (50 + atoms + 10 * dof) / 2` steps, instead of
+    `num_modes * exhaustiveness` short runs;
+  - each step mutates one thing (position, orientation, or one torsion set
+    to a random angle) and is minimized by Vina's dense BFGS and line search
+    for `(25 + atoms) / 3` steps before the Metropolis test at 1.2;
+  - grids span exactly the search box, and atoms outside it are clamped and
+    penalized; clashes are softened during the search (`hunt_cap`);
+  - each chain keeps its distinct low minima; chains merge at 2 A, modes
+    are deduplicated at `min_rmsd`, then refined and rescored on exact
+    energies;
+  - a mode's energy is its intermolecular energy plus its internal energy
+    relative to the best mode's.
+- Intramolecular pair energies are tabulated per pair of atom classes
+  (as Vina's `precalculate`); they were 90% of each evaluation.
+- `MonteCarloParams` now holds Vina's settings (`exhaustiveness`,
+  `temperature`, `mutation_amplitude`, `hunt_cap`, `min_rmsd`,
+  `local_steps`); the old per-move probabilities and step limits are gone.
+  In `Optimizer::generate_poses`, `num_poses` is the number of modes and
+  `max_steps` the Monte Carlo steps per chain (`0` for Vina's default).
+
 ### Added
 - `benchmark/parity/`: a CASF-2016 docking parity harness against AutoDock
   Vina 1.2.7. Both programs dock identical Meeko/Open Babel-prepared inputs;
