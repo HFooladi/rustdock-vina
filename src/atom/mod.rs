@@ -46,6 +46,13 @@ pub enum AtomType {
     // Zinc pseudo-atom
     ZincPseudo, // TZ
 
+    // Macrocycle closure, as Meeko writes a ring it opened for flexible
+    // docking: the carbon on each side of the broken bond (`CG0`-`CG3`) and
+    // the dummy standing in for its partner (`G0`-`G3`). The number pairs
+    // each dummy with the carbon it is glued back onto.
+    CarbonClosure(u8), // CG0-CG3
+    ClosureDummy(u8),  // G0-G3
+
     // For atoms that don't match any of the above
     Unknown,
 }
@@ -84,6 +91,8 @@ impl AtomType {
             | AtomType::Mercury
             | AtomType::Uranium => 1.2,
             AtomType::ZincPseudo => 0.25,
+            AtomType::CarbonClosure(_) => 1.9,
+            AtomType::ClosureDummy(_) => 0.0,
             AtomType::Unknown => 1.9, // Default to carbon radius
         }
     }
@@ -127,6 +136,14 @@ impl AtomType {
             "MG" => AtomType::Magnesium,
             "FE" => AtomType::Iron,
             "TZ" => AtomType::ZincPseudo,
+            "CG0" => AtomType::CarbonClosure(0),
+            "CG1" => AtomType::CarbonClosure(1),
+            "CG2" => AtomType::CarbonClosure(2),
+            "CG3" => AtomType::CarbonClosure(3),
+            "G0" => AtomType::ClosureDummy(0),
+            "G1" => AtomType::ClosureDummy(1),
+            "G2" => AtomType::ClosureDummy(2),
+            "G3" => AtomType::ClosureDummy(3),
             _ => AtomType::Unknown,
         }
     }
@@ -191,10 +208,42 @@ impl AtomType {
         matches!(self, AtomType::Hydrogen | AtomType::HydrogenD)
     }
 
+    /// Whether this is a macrocycle closure dummy (`G0`-`G3`).
+    pub fn is_closure_dummy(&self) -> bool {
+        matches!(self, AtomType::ClosureDummy(_))
+    }
+
+    /// Whether `a` and `b` are a closure dummy and the carbon it is glued
+    /// onto (`G0` with `CG0`, and so on). Vina pulls such a pair together
+    /// during the search to close the ring, and puts it at optimal distance
+    /// zero.
+    pub fn is_glue_pair(a: AtomType, b: AtomType) -> bool {
+        matches!(
+            (a, b),
+            (AtomType::CarbonClosure(i), AtomType::ClosureDummy(j))
+                | (AtomType::ClosureDummy(j), AtomType::CarbonClosure(i)) if i == j
+        )
+    }
+
+    /// Whether Vina's pair potentials score `a` against `b` at all: never a
+    /// hydrogen, and a closure dummy only against its own closure carbon
+    /// (Vina's `is_unmatched_closure_dummy`, and its grids skip dummies).
+    pub fn pair_is_scored(a: AtomType, b: AtomType) -> bool {
+        if a.is_hydrogen() || b.is_hydrogen() {
+            return false;
+        }
+        if a.is_closure_dummy() || b.is_closure_dummy() {
+            return Self::is_glue_pair(a, b);
+        }
+        true
+    }
+
     /// Whether this is a heteroatom for the purpose of the `C_H`/`C_P` split.
     ///
     /// As Vina's `ad_is_heteroatom` plus metals: every type but carbon and
     /// hydrogen, so a carbon bonded to a halogen or a metal is polar too.
+    /// That includes the closure types `CG`/`G`, which Vina does not count
+    /// as carbon either.
     pub fn is_heteroatom(&self) -> bool {
         !matches!(
             self,
@@ -237,6 +286,8 @@ impl AtomType {
             AtomType::Mercury => "Hg",
             AtomType::Uranium => "U",
             AtomType::ZincPseudo => "TZ",
+            AtomType::CarbonClosure(n) => ["CG0", "CG1", "CG2", "CG3"][(n & 3) as usize],
+            AtomType::ClosureDummy(n) => ["G0", "G1", "G2", "G3"][(n & 3) as usize],
             AtomType::Unknown => "X",
         }
     }
@@ -375,6 +426,29 @@ mod tests {
         assert_eq!(AtomType::from_pdbqt_string("HD"), AtomType::HydrogenD);
         assert_eq!(AtomType::from_pdbqt_string("TZ"), AtomType::ZincPseudo);
         assert_eq!(AtomType::from_pdbqt_string("UNKNOWN"), AtomType::Unknown);
+    }
+
+    #[test]
+    fn test_closure_types() {
+        assert_eq!(
+            AtomType::from_pdbqt_string("CG2"),
+            AtomType::CarbonClosure(2)
+        );
+        assert_eq!(AtomType::from_pdbqt_string("G3"), AtomType::ClosureDummy(3));
+        assert_eq!(AtomType::CarbonClosure(1).to_pdbqt_string(), "CG1");
+        assert_eq!(AtomType::ClosureDummy(0).to_pdbqt_string(), "G0");
+        assert!(AtomType::CarbonClosure(0).is_heteroatom());
+        assert!(!AtomType::CarbonClosure(0).is_potentially_hydrophobic());
+
+        let (cg0, g0, g1) = (
+            AtomType::CarbonClosure(0),
+            AtomType::ClosureDummy(0),
+            AtomType::ClosureDummy(1),
+        );
+        assert!(AtomType::is_glue_pair(g0, cg0) && AtomType::pair_is_scored(cg0, g0));
+        assert!(!AtomType::is_glue_pair(g1, cg0) && !AtomType::pair_is_scored(g1, cg0));
+        assert!(!AtomType::pair_is_scored(g0, AtomType::Carbon));
+        assert!(AtomType::pair_is_scored(cg0, AtomType::OxygenH));
     }
 
     #[test]

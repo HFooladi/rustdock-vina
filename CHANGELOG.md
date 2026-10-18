@@ -62,6 +62,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pose is within 2 A of the crystal pose for 15/16 seeds.
 
 ### Fixed
+- Macrocycles opened by Meeko now dock and score as in Vina 1.2.7. The
+  closure types `CG0`-`CG3` and `G0`-`G3` are read (the atom type is read to
+  the end of the line, not two columns); bonds are inferred only within a
+  rigid fragment, so a dummy no longer bonds to the carbon it sits on; and
+  Vina's closure rules apply: dummies are not scored against the receptor or
+  other atoms, pairs within three bonds of the closure are excluded, and
+  during the search each dummy is pulled onto its carbon by a `50 * r`
+  attraction. Crystal-pose scores of the 12 CASF-2016 macrocycles went from
+  up to 1.23 kcal/mol off Vina's to within 0.013.
+- During Monte Carlo the ligand-receptor energy is capped at 1.5 per atom
+  (`MonteCarloParams::hunt_cap_receptor`, Vina's `hunt_cap[1]`), not 10.
 - PDBQT output now round-trips. Docking results are written in Vina's
   layout (`MODEL n`, `REMARK VINA RESULT: affinity rmsd_lb rmsd_ub`, then
   `INTER + INTRA`, `INTER`, `INTRA`, `UNBOUND`) followed by the ligand's own

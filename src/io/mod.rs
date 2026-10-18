@@ -42,6 +42,10 @@ pub fn parse_pdbqt<P: AsRef<Path>>(path: P) -> Result<Molecule, IoError> {
     let mut branch_stack: Vec<(usize, usize)> = Vec::new();
     let mut branch_atoms: Vec<Vec<usize>> = Vec::new();
     let mut current_branch_atoms: Vec<usize> = Vec::new();
+    // Rigid fragment of each atom: the ROOT is 0, each BRANCH opens a new one.
+    let mut fragment_of: Vec<usize> = Vec::new();
+    let mut fragment_stack: Vec<usize> = vec![0];
+    let mut fragment_count = 1;
 
     // Track model number for multi-model files
     let mut model_number = 1;
@@ -68,6 +72,7 @@ pub fn parse_pdbqt<P: AsRef<Path>>(path: P) -> Result<Molecule, IoError> {
             // Parse atom record
             let atom = parse_pdbqt_atom(&line, line_number)?;
             let atom_idx = molecule.add_atom(atom);
+            fragment_of.push(*fragment_stack.last().unwrap_or(&0));
 
             // Add to current branch if any
             if !branch_stack.is_empty() {
@@ -115,6 +120,8 @@ pub fn parse_pdbqt<P: AsRef<Path>>(path: P) -> Result<Molecule, IoError> {
             // Start a new branch - store atom indices for later bond creation
             branch_stack.push((from_atom, to_atom));
             current_branch_atoms = Vec::new();
+            fragment_stack.push(fragment_count);
+            fragment_count += 1;
         } else if line.starts_with("ENDBRANCH") {
             // Parse ENDBRANCH record
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -123,6 +130,9 @@ pub fn parse_pdbqt<P: AsRef<Path>>(path: P) -> Result<Molecule, IoError> {
                     line: line_number,
                     message: format!("Invalid ENDBRANCH record: {}", line),
                 });
+            }
+            if fragment_stack.len() > 1 {
+                fragment_stack.pop();
             }
 
             if let Some((from_atom, to_atom)) = branch_stack.pop() {
@@ -170,7 +180,7 @@ pub fn parse_pdbqt<P: AsRef<Path>>(path: P) -> Result<Molecule, IoError> {
     // Always infer connectivity. BRANCH records only describe the rotatable
     // bonds (6 for a typical drug-like ligand), which is nowhere near the full
     // bond graph that atom typing needs.
-    infer_bonds(&mut molecule);
+    infer_bonds(&mut molecule, &fragment_of);
 
     // Hydrophobicity and donor status depend on connectivity, so they can only
     // be assigned once bonds exist.
@@ -247,12 +257,9 @@ fn parse_pdbqt_atom(line: &str, line_number: usize) -> Result<Atom, IoError> {
         0.0
     };
 
-    // Parse atom type
-    let atom_type_str = if line.len() >= 79 {
-        line[77..79].trim()
-    } else {
-        ""
-    };
+    // Parse atom type: column 78 to the end of the line, as Vina reads it,
+    // since some types (`CG0`) run past the two-column field.
+    let atom_type_str = line.get(77..).unwrap_or("").trim();
 
     let atom_type = AtomType::from_pdbqt_string(atom_type_str);
 
@@ -271,8 +278,13 @@ fn parse_pdbqt_atom(line: &str, line_number: usize) -> Result<Atom, IoError> {
     Ok(atom)
 }
 
-/// Infer bonds based on distances between atoms
-fn infer_bonds(molecule: &mut Molecule) {
+/// Infer bonds based on distances between atoms.
+///
+/// As in Vina, only atoms of the same rigid fragment (`fragment_of`) can
+/// bond by distance; bonds between fragments are the BRANCH bonds. This
+/// keeps an opened macrocycle open: Meeko puts each closure dummy right on
+/// top of a carbon in another fragment.
+fn infer_bonds(molecule: &mut Molecule, fragment_of: &[usize]) {
     // Heavy-atom covalent bonds run to about 1.9 A (S-S is the long case at
     // ~2.05); bonds to hydrogen are near 1.1. Using one flat threshold for both
     // would pull in 1-3 neighbours, which sit around 2.4 A.
@@ -289,6 +301,9 @@ fn infer_bonds(molecule: &mut Molecule) {
 
     for i in 0..molecule.atoms.len() {
         for j in (i + 1)..molecule.atoms.len() {
+            if fragment_of.get(i) != fragment_of.get(j) {
+                continue;
+            }
             let atom1 = &molecule.atoms[i];
             let atom2 = &molecule.atoms[j];
 
@@ -520,6 +535,61 @@ mod tests {
         }
         assert!(back.pdbqt_records.iter().all(|l| !is_score_remark(l)));
         assert_eq!(back.pdbqt_records.len(), ligand.pdbqt_records.len());
+    }
+
+    /// A six-membered ring opened as Meeko writes it: closure carbons 1 and
+    /// 7 in different rigid fragments, each carrying a dummy (2, 8) that
+    /// sits exactly on the other.
+    const OPENED_RING: &str = "\
+ROOT
+ATOM      1  C   UNL     1       1.500   0.000   0.000  1.00  0.00     0.000 CG0
+ATOM      2  G   UNL     1       0.750  -1.300   0.000  1.00  0.00     0.000 G0
+ATOM      3  C   UNL     1       0.750   1.300   0.000  1.00  0.00     0.000 C
+ENDROOT
+BRANCH   3   4
+ATOM      4  C   UNL     1      -0.750   1.300   0.000  1.00  0.00     0.000 C
+BRANCH   4   5
+ATOM      5  C   UNL     1      -1.500   0.000   0.000  1.00  0.00     0.000 C
+BRANCH   5   6
+ATOM      6  C   UNL     1      -0.750  -1.300   0.000  1.00  0.00     0.000 C
+ATOM      7  C   UNL     1       0.750  -1.300   0.000  1.00  0.00     0.000 CG0
+ATOM      8  G   UNL     1       1.500   0.000   0.000  1.00  0.00     0.000 G0
+ENDBRANCH   5   6
+ENDBRANCH   4   5
+ENDBRANCH   3   4
+TORSDOF 3
+";
+
+    /// Closure types parse in full, and bonds form only within a rigid
+    /// fragment, so the ring stays open and each dummy is glued, not
+    /// bonded, to its partner.
+    #[test]
+    fn test_opened_macrocycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ring.pdbqt");
+        std::fs::write(&path, OPENED_RING).unwrap();
+        let ring = parse_pdbqt(&path).unwrap();
+
+        assert_eq!(ring.atoms[0].atom_type, AtomType::CarbonClosure(0));
+        assert_eq!(ring.atoms[1].atom_type, AtomType::ClosureDummy(0));
+        let mut bonds: Vec<_> = ring
+            .bonds
+            .iter()
+            .map(|b| ordered_pair(b.atom1_idx, b.atom2_idx))
+            .collect();
+        bonds.sort();
+        assert_eq!(
+            bonds,
+            [(0, 1), (0, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7)]
+        );
+        // The carbons next to a closure carbon are polar, as Vina has it.
+        assert!(!ring.atoms[2].is_hydrophobic && !ring.atoms[5].is_hydrophobic);
+        assert!(ring.atoms[3].is_hydrophobic);
+
+        assert_eq!(ring.glue_pairs(), [(0, 7), (1, 6)]);
+        // Closed, every heavy pair is within three bonds of the closure, and
+        // dummies pair with nothing else.
+        assert!(ring.intramolecular_pairs().is_empty());
     }
 
     #[test]

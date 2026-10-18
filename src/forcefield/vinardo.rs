@@ -55,7 +55,7 @@ impl VinardoForceField {
     /// than Vina's.
     pub fn radius(atom_type: AtomType) -> f64 {
         match atom_type {
-            AtomType::Carbon => 2.0,
+            AtomType::Carbon | AtomType::CarbonClosure(_) => 2.0,
             AtomType::Nitrogen | AtomType::NitrogenH => 1.7,
             AtomType::Oxygen | AtomType::OxygenH => 1.6,
             AtomType::Sulfur | AtomType::SulfurH => 2.0,
@@ -72,13 +72,16 @@ impl VinardoForceField {
     /// Surface distance `r - R1 - R2` with Vinardo's radii.
     #[inline]
     fn surface_distance(atom1: &Atom, atom2: &Atom, distance: f64) -> f64 {
+        // A closure dummy sits on its carbon when the ring is closed.
+        if AtomType::is_glue_pair(atom1.atom_type, atom2.atom_type) {
+            return distance;
+        }
         distance - Self::radius(atom1.atom_type) - Self::radius(atom2.atom_type)
     }
 
     #[inline]
     fn scored(atom1: &Atom, atom2: &Atom, distance: f64) -> bool {
-        !atom1.atom_type.is_hydrogen()
-            && !atom2.atom_type.is_hydrogen()
+        AtomType::pair_is_scored(atom1.atom_type, atom2.atom_type)
             && (0.01..CUTOFF).contains(&distance)
     }
 

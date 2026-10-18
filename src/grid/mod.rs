@@ -321,7 +321,7 @@ impl ProbeKey {
 pub struct GridSet {
     grids: Vec<Grid>,
     /// Grid index for each ligand atom; `None` for atoms that never interact
-    /// (hydrogens).
+    /// with the receptor (hydrogens and closure dummies).
     atom_grid: Vec<Option<usize>>,
     /// Receptor heavy atoms, kept for scoring atoms outside the grid.
     receptor: Vec<Atom>,
@@ -364,7 +364,8 @@ impl GridSet {
             .atoms
             .iter()
             .map(|atom| {
-                if atom.atom_type.is_hydrogen() {
+                // Vina's grids skip closure dummies as well as hydrogens.
+                if atom.atom_type.is_hydrogen() || atom.atom_type.is_closure_dummy() {
                     return None;
                 }
                 let key = ProbeKey::of(atom);
