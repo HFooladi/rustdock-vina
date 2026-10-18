@@ -6,6 +6,9 @@ use std::collections::HashMap;
 use std::f64::consts::PI;
 use thiserror::Error;
 
+/// Indices of two atoms in a molecule.
+type AtomPair = (usize, usize);
+
 /// Wrap an angle into `[-PI, PI]`.
 fn wrap_angle(mut angle: f64) -> f64 {
     while angle > PI {
@@ -237,11 +240,30 @@ impl Molecule {
     /// Vina scores a ligand against itself over pairs separated by more than
     /// three bonds; closer pairs are held rigid by the covalent geometry and
     /// would contribute a large constant repulsion. Hydrogens are excluded, as
-    /// everywhere else in the scoring.
+    /// everywhere else in the scoring, and so are the pairs an opened
+    /// macrocycle would hold within three bonds once closed, the closure
+    /// dummies, and the [glue pairs](Self::glue_pairs).
     ///
     /// The result depends only on topology, not coordinates, so it is safe to
     /// compute once and reuse across an entire optimization.
     pub fn intramolecular_pairs(&self) -> Vec<(usize, usize)> {
+        self.nonbonded_pairs().0
+    }
+
+    /// The pairs that close an opened macrocycle: each closure dummy with
+    /// the carbon it is glued onto (`G0` with `CG0`, ...), more than three
+    /// bonds apart as any scoring pair.
+    ///
+    /// Vina keeps these apart from [`intramolecular_pairs`](Self::intramolecular_pairs):
+    /// during the search they carry a stiff linear attraction that pulls the
+    /// ring shut, and they never count toward a reported energy.
+    pub fn glue_pairs(&self) -> Vec<(usize, usize)> {
+        self.nonbonded_pairs().1
+    }
+
+    /// Heavy-atom pairs more than three bonds apart, split into scoring
+    /// pairs and glue pairs.
+    fn nonbonded_pairs(&self) -> (Vec<AtomPair>, Vec<AtomPair>) {
         let n = self.atoms.len();
         let mut adjacency = vec![Vec::new(); n];
         for bond in &self.bonds {
@@ -252,6 +274,7 @@ impl Molecule {
         }
 
         let mut pairs = Vec::new();
+        let mut glue = Vec::new();
         let mut depth = vec![usize::MAX; n];
         let mut queue = std::collections::VecDeque::new();
 
@@ -282,13 +305,46 @@ impl Molecule {
                 if self.atoms[other].atom_type.is_hydrogen() {
                     continue;
                 }
-                if bond_distance > 3 {
+                if bond_distance <= 3 {
+                    continue;
+                }
+                let types = (self.atoms[start].atom_type, self.atoms[other].atom_type);
+                if AtomType::is_glue_pair(types.0, types.1) {
+                    glue.push((start, other));
+                } else if self.is_closure_scored(start, other, &adjacency) {
                     pairs.push((start, other));
                 }
             }
         }
 
-        pairs
+        (pairs, glue)
+    }
+
+    /// Whether a pair more than three bonds apart is an ordinary scoring
+    /// pair under Vina's macrocycle rules: not a glue pair, not a closure
+    /// dummy against anything but its carbon (`is_unmatched_closure_dummy`),
+    /// and not within three bonds once the ring is closed
+    /// (`is_closure_clash`: each atom is, or neighbours, a closure carbon
+    /// of the same number).
+    fn is_closure_scored(&self, i: usize, j: usize, adjacency: &[Vec<usize>]) -> bool {
+        let (ti, tj) = (self.atoms[i].atom_type, self.atoms[j].atom_type);
+        if ti.is_closure_dummy() || tj.is_closure_dummy() {
+            return false;
+        }
+        let closure_carbons = |k: usize| {
+            std::iter::once(k)
+                .chain(adjacency[k].iter().copied())
+                .filter_map(|n| match self.atoms[n].atom_type {
+                    AtomType::CarbonClosure(c) => Some(c),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let near_i = closure_carbons(i);
+        if near_i.is_empty() {
+            return true;
+        }
+        !closure_carbons(j).iter().any(|c| near_i.contains(c))
     }
 
     /// Rotate a torsion by `delta_angle` radians, moving the atoms distal to

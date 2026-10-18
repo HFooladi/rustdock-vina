@@ -3,7 +3,7 @@
 //! This implementation follows the original AutoDock Vina scoring function
 //! as described in Trott & Olson, J. Comput. Chem. 2010.
 
-use crate::atom::Atom;
+use crate::atom::{Atom, AtomType};
 use crate::forcefield::{ForceField, ForceFieldError};
 use nalgebra::Vector3;
 
@@ -63,6 +63,10 @@ impl VinaForceField {
     /// This is distance minus the sum of van der Waals radii
     #[inline]
     fn surface_distance(atom1: &Atom, atom2: &Atom, distance: f64) -> f64 {
+        // A closure dummy sits on its carbon when the ring is closed.
+        if AtomType::is_glue_pair(atom1.atom_type, atom2.atom_type) {
+            return distance;
+        }
         let r1 = atom1.atom_type.radius();
         let r2 = atom2.atom_type.radius();
         distance - r1 - r2
@@ -126,7 +130,7 @@ impl ForceField for VinaForceField {
         distance: f64,
     ) -> Result<f64, ForceFieldError> {
         // Vina scores heavy atoms only; hydrogens are implicit in the weights.
-        if atom1.atom_type.is_hydrogen() || atom2.atom_type.is_hydrogen() {
+        if !AtomType::pair_is_scored(atom1.atom_type, atom2.atom_type) {
             return Ok(0.0);
         }
 
@@ -153,8 +157,7 @@ impl ForceField for VinaForceField {
         atom2: &Atom,
         distance: f64,
     ) -> Result<f64, ForceFieldError> {
-        if atom1.atom_type.is_hydrogen()
-            || atom2.atom_type.is_hydrogen()
+        if !AtomType::pair_is_scored(atom1.atom_type, atom2.atom_type)
             || !(0.01..=CUTOFF).contains(&distance)
         {
             return Ok(0.0);
@@ -175,8 +178,7 @@ impl ForceField for VinaForceField {
         atom2: &Atom,
         distance: f64,
     ) -> Result<f64, ForceFieldError> {
-        if atom1.atom_type.is_hydrogen()
-            || atom2.atom_type.is_hydrogen()
+        if !AtomType::pair_is_scored(atom1.atom_type, atom2.atom_type)
             || !(0.01..=CUTOFF).contains(&distance)
         {
             return Ok(0.0);
@@ -209,8 +211,7 @@ impl ForceField for VinaForceField {
         atom2: &Atom,
         distance: f64,
     ) -> Result<f64, ForceFieldError> {
-        if atom1.atom_type.is_hydrogen()
-            || atom2.atom_type.is_hydrogen()
+        if !AtomType::pair_is_scored(atom1.atom_type, atom2.atom_type)
             || !(0.01..=CUTOFF).contains(&distance)
         {
             return Ok(0.0);
@@ -226,8 +227,7 @@ impl ForceField for VinaForceField {
         atom2: &Atom,
         distance: f64,
     ) -> Result<f64, ForceFieldError> {
-        if atom1.atom_type.is_hydrogen()
-            || atom2.atom_type.is_hydrogen()
+        if !AtomType::pair_is_scored(atom1.atom_type, atom2.atom_type)
             || !(0.01..=CUTOFF).contains(&distance)
         {
             return Ok(0.0);
@@ -552,5 +552,41 @@ mod tests {
         // 6 rotatable bonds (like imatinib)
         let penalty = ff.rotatable_bond_penalty(6);
         assert!((penalty - 0.35076).abs() < 0.001);
+    }
+
+    /// A closure dummy scores only against its own closure carbon, at
+    /// optimal distance zero, and never against the receptor.
+    #[test]
+    fn test_closure_dummy_scoring() {
+        let ff = VinaForceField::new();
+        let at = |t: AtomType| {
+            Atom::new(
+                t,
+                Vector3::zeros(),
+                "X".to_string(),
+                1,
+                "LIG".to_string(),
+                1,
+                'A',
+                0.0,
+            )
+        };
+        let (g0, cg0) = (
+            at(AtomType::ClosureDummy(0)),
+            at(AtomType::CarbonClosure(0)),
+        );
+        let c = at(AtomType::Carbon);
+        assert_eq!(ff.atom_pair_energy(&g0, &c, 4.0).unwrap(), 0.0);
+        assert_eq!(
+            ff.atom_pair_energy(&at(AtomType::ClosureDummy(1)), &cg0, 1.0)
+                .unwrap(),
+            0.0
+        );
+        // Glued at r = 0.2: surface distance 0.2, so gauss terms only.
+        let d: f64 = 0.2;
+        let p = &ff.params;
+        let expected = p.weight_gauss1 * (-(d / 0.5).powi(2)).exp()
+            + p.weight_gauss2 * (-((d - 3.0) / 2.0).powi(2)).exp();
+        assert!((ff.atom_pair_energy(&g0, &cg0, d).unwrap() - expected).abs() < 1e-12);
     }
 }

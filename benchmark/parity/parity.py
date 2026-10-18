@@ -53,12 +53,16 @@ RDLogger.DisableLog("rdApp.*")
 # --------------------------------------------------------------------------
 
 
-def select(subset: str) -> list[str]:
-    """CASF-2016 codes for a subset.
+def select(subset: str, data: Path) -> list[str]:
+    """Complex codes for a subset.
 
-    full: all 285. targets: the best-resolved complex of each of the 57
-    targets. pilot: those of the odd-numbered targets (29).
+    CASF-2016 core set: full is all 285; targets the best-resolved complex of
+    each of the 57 targets; pilot those of the odd-numbered targets (29).
+    posebusters: every complex directory under `data` (the PoseBusters
+    benchmark set).
     """
+    if subset == "posebusters":
+        return sorted(p.name for p in data.iterdir() if p.is_dir())
     core = pd.read_csv(CORESET, sep="\t", comment="#", header=None,
                        names=["code", "resolution", "year", "target"])
     if subset == "full":
@@ -71,7 +75,9 @@ def select(subset: str) -> list[str]:
 
 
 def find_entry(pdbbind: Path, code: str) -> Path:
-    for d in sorted(pdbbind.glob(f"*/{code}")):
+    """The directory holding `<code>_protein.pdb`: `<root>/<code>` (PoseBusters)
+    or `<root>/<group>/<code>` (PDBbind)."""
+    for d in [pdbbind / code, *sorted(pdbbind.glob(f"*/{code}"))]:
         if d.parent.name != "demo" and (d / f"{code}_protein.pdb").exists():
             return d
     raise FileNotFoundError(f"{code} not found under {pdbbind}")
@@ -110,10 +116,15 @@ def prepare(code: str, entry: Path, out: Path) -> dict:
     out.mkdir(parents=True, exist_ok=True)
 
     # Receptor: protein without waters, typed and charged by Open Babel.
+    # PDBbind proteins carry hydrogens; PoseBusters' do not, and without
+    # polar hydrogens a receptor has no H-bond donors, so add them at pH 7.4.
     protein = out / "protein_dry.pdb"
     lines = (entry / f"{code}_protein.pdb").read_text().splitlines()
     protein.write_text("\n".join(l for l in lines if l[17:20] != "HOH") + "\n")
-    subprocess.run(["obabel", "-ipdb", str(protein), "-opdbqt", "-xr",
+    atoms = [l for l in lines if l.startswith(("ATOM", "HETATM"))]
+    has_h = any(l[76:78].strip() == "H" for l in atoms)
+    protonate = [] if has_h else ["-p", "7.4"]
+    subprocess.run(["obabel", "-ipdb", str(protein), *protonate, "-opdbqt", "-xr",
                     "-O", str(out / "receptor.pdbqt")],
                    check=True, capture_output=True)
 
@@ -335,7 +346,7 @@ def run(args: argparse.Namespace) -> None:
     if not VINA.exists():
         sys.exit(f"missing {VINA}; see benchmark/parity/README.md")
     subprocess.run(["cargo", "build", "--release", "--quiet"], cwd=REPO, check=True)
-    codes = args.codes or select(args.subset)
+    codes = args.codes or select(args.subset, args.pdbbind)
     rows = []
     for n, code in enumerate(codes, 1):
         out = args.work / code
@@ -412,7 +423,10 @@ def write_report(frame: pd.DataFrame, args: argparse.Namespace) -> None:
     lines = [
         f"# Docking parity: rustdock-vina vs AutoDock Vina 1.2.7 ({args.scoring} scoring)",
         "",
-        f"CASF-2016 core set, subset `{args.subset}` ({len(frame)} complexes). "
+        (f"PoseBusters benchmark set ({len(frame)} complexes). "
+         if args.subset == "posebusters" else
+         f"CASF-2016 core set, subset `{args.subset}` ({len(frame)} complexes). ")
+        +
         f"Identical inputs for both: Meeko-prepared ligand from an RDKit conformer, "
         f"Open Babel receptor, box = crystal ligand extent + {BOX_PADDING:g} A, "
         f"exhaustiveness {EXHAUSTIVENESS}, {NUM_MODES} modes, seed {SEED}, "
@@ -483,15 +497,20 @@ def main() -> None:
         p.add_argument("--work", type=Path,
                        help="work directory (default: work, or work-<scoring>)")
         p.add_argument("--scoring", choices=["vina", "vinardo"], default="vina")
-        p.add_argument("--subset", choices=["pilot", "targets", "full"], default="pilot")
+        p.add_argument("--subset", choices=["pilot", "targets", "full", "posebusters"],
+                       default="pilot")
         p.add_argument("--cpu", type=int, default=16)
         p.add_argument("--report", type=Path)
-    sub.choices["run"].add_argument("--pdbbind", type=Path, required=True,
-                                    help="PDBbind root holding <group>/<code>/ entries")
+    sub.choices["run"].add_argument("--pdbbind", "--data", type=Path, required=True,
+                                    help="dataset root: PDBbind (<group>/<code>/) or "
+                                         "the PoseBusters benchmark set (<code>/)")
     sub.choices["run"].add_argument("--codes", nargs="*", help="override the subset")
     args = parser.parse_args()
     if args.work is None:
-        args.work = HERE / ("work" if args.scoring == "vina" else f"work-{args.scoring}")
+        name = "work" if args.subset != "posebusters" else "work-posebusters"
+        if args.scoring != "vina":
+            name += f"-{args.scoring}"
+        args.work = HERE / name
     args.work.mkdir(parents=True, exist_ok=True)
     args.func(args)
 

@@ -11,7 +11,7 @@ use crate::forcefield::ForceField;
 use crate::grid::{pairwise_energy_and_gradient, GridSet};
 use crate::molecule::Molecule;
 use crate::optimization::vina_search::{
-    vina_global_steps, vina_local_steps, ExactField, GridField, InterField, SearchBox,
+    vina_global_steps, vina_local_steps, Caps, ExactField, GridField, InterField, SearchBox,
     SearchSettings, Searcher,
 };
 use crate::optimization::{DockingResult, OptimizationError, Optimizer};
@@ -30,9 +30,15 @@ pub struct MonteCarloParams {
     /// moves a typical atom about as far (Vina: 2).
     pub mutation_amplitude: f64,
 
-    /// Cap that softens clashes while the search explores (Vina's
-    /// `hunt_cap`: 10). Positive energies `e` count as `e * cap / (cap + e)`.
+    /// Cap that softens the ligand's internal clashes while the search
+    /// explores (Vina's `hunt_cap[0]` and `[2]`: 10). Positive energies `e`
+    /// count as `e * cap / (cap + e)`.
     pub hunt_cap: f64,
+
+    /// The same cap on each ligand atom's energy against the receptor
+    /// (Vina's `hunt_cap[1]`: 1.5), letting the search pass through the
+    /// receptor more easily than through itself.
+    pub hunt_cap_receptor: f64,
 
     /// Minimum heavy-atom RMSD between reported modes, in Angstroms
     /// (Vina's `--min_rmsd`: 1).
@@ -72,6 +78,7 @@ impl Default for MonteCarloParams {
             temperature: 1.2,
             mutation_amplitude: 2.0,
             hunt_cap: 10.0,
+            hunt_cap_receptor: 1.5,
             min_rmsd: 1.0,
             local_steps: None,
             randomize_initial_pose: true,
@@ -158,7 +165,10 @@ impl MonteCarlo {
             min_rmsd: self.params.min_rmsd,
             temperature: self.params.temperature,
             mutation_amplitude: self.params.mutation_amplitude,
-            hunt_cap: self.params.hunt_cap,
+            hunt_caps: Caps {
+                receptor: self.params.hunt_cap_receptor,
+                intra: self.params.hunt_cap,
+            },
             randomize: self.params.randomize_initial_pose,
         };
         // Each chain's seed is mixed from (master, chain index), so the set

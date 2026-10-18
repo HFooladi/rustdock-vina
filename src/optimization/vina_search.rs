@@ -35,6 +35,26 @@ pub(crate) const SLOPE: f64 = 1e6;
 /// large enough to leave realistic energies untouched.
 pub(crate) const AUTHENTIC_CAP: f64 = 1000.0;
 
+/// Curl caps for the two halves of the search energy (Vina's `v`): the
+/// ligand-receptor energy (`v[1]`) and the ligand's own pairs, intra and
+/// glue (`v[0]`, `v[2]`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Caps {
+    pub(crate) receptor: f64,
+    pub(crate) intra: f64,
+}
+
+/// Vina's `authentic_v`.
+pub(crate) const AUTHENTIC: Caps = Caps {
+    receptor: AUTHENTIC_CAP,
+    intra: AUTHENTIC_CAP,
+};
+
+/// Weight of the linear attraction that closes an opened macrocycle
+/// (Vina's `weight_glue`), and the distance it reaches to (`max_cutoff`).
+const GLUE_WEIGHT: f64 = 50.0;
+const GLUE_CUTOFF: f64 = 20.0;
+
 /// RMSD within which two poses from different chains are merged.
 const MERGE_RMSD: f64 = 2.0;
 
@@ -136,6 +156,8 @@ pub(crate) struct LigandModel<'a> {
     torsions: Vec<TorsionAxis>,
     heavy: Vec<usize>,
     pairs: Vec<(usize, usize)>,
+    /// Closure dummy - closure carbon pairs of an opened macrocycle.
+    glue: Vec<(usize, usize)>,
 }
 
 impl<'a> LigandModel<'a> {
@@ -166,6 +188,7 @@ impl<'a> LigandModel<'a> {
             torsions,
             heavy,
             pairs: ligand.intramolecular_pairs(),
+            glue: ligand.glue_pairs(),
         }
     }
 
@@ -478,7 +501,7 @@ pub(crate) struct SearchSettings {
     pub(crate) min_rmsd: f64,
     pub(crate) temperature: f64,
     pub(crate) mutation_amplitude: f64,
-    pub(crate) hunt_cap: f64,
+    pub(crate) hunt_caps: Caps,
     pub(crate) randomize: bool,
 }
 
@@ -556,14 +579,53 @@ impl<'a> Searcher<'a> {
         field: &dyn InterField,
         conf: &Conf,
         slope: f64,
-        cap: f64,
+        caps: Caps,
         s: &mut Scratch,
     ) -> Result<(f64, DVector<f64>), OptimizationError> {
         self.model.coords(conf, &mut s.coords);
         s.grads.iter_mut().for_each(|g| *g = Vector3::zeros());
-        let mut e = field.eval(self.model.atoms, &s.coords, slope, cap, &mut s.grads)?;
-        e += self.intra(&s.coords, cap, Some(&mut s.grads))?;
+        let mut e = field.eval(
+            self.model.atoms,
+            &s.coords,
+            slope,
+            caps.receptor,
+            &mut s.grads,
+        )?;
+        e += self.intra(&s.coords, caps.intra, Some(&mut s.grads))?;
+        e += self.glue(&s.coords, caps.intra, &mut s.grads)?;
         Ok((e, self.model.conf_gradient(conf, &s.coords, &s.grads)))
+    }
+
+    /// The pull that closes an opened macrocycle: each glue pair's pair
+    /// energy plus [`GLUE_WEIGHT`] per Angstrom of separation, curled with
+    /// `cap`. Part of the search energy only, never of a reported one.
+    fn glue(
+        &self,
+        coords: &[Vector3<f64>],
+        cap: f64,
+        grads: &mut [Vector3<f64>],
+    ) -> Result<f64, OptimizationError> {
+        let atoms = self.model.atoms;
+        let mut total = 0.0;
+        for &(i, j) in &self.model.glue {
+            let delta = coords[i] - coords[j];
+            let r = delta.norm();
+            if r >= GLUE_CUTOFF || r <= 1e-6 {
+                continue;
+            }
+            let mut e =
+                self.forcefield.atom_pair_energy(&atoms[i], &atoms[j], r)? + GLUE_WEIGHT * r;
+            let de_dr = self
+                .forcefield
+                .atom_pair_derivative(&atoms[i], &atoms[j], r)?
+                + GLUE_WEIGHT;
+            let mut d = delta * (de_dr / r);
+            curl(&mut e, &mut d, cap);
+            total += e;
+            grads[i] += d;
+            grads[j] -= d;
+        }
+        Ok(total)
     }
 
     /// The ligand's internal energy over its interacting pairs, each pair's
@@ -629,13 +691,13 @@ impl<'a> Searcher<'a> {
         field: &dyn InterField,
         x: &mut Conf,
         slope: f64,
-        cap: f64,
+        caps: Caps,
         max_steps: usize,
         s: &mut Scratch,
     ) -> Result<f64, OptimizationError> {
         let n = 6 + self.model.n_torsions();
         let mut h = DMatrix::<f64>::identity(n, n);
-        let (mut f0, mut g) = self.eval_deriv(field, x, slope, cap, s)?;
+        let (mut f0, mut g) = self.eval_deriv(field, x, slope, caps, s)?;
         let (f_orig, x_orig) = (f0, x.clone());
 
         for step in 0..max_steps {
@@ -650,7 +712,7 @@ impl<'a> Searcher<'a> {
             for _ in 0..10 {
                 x_new = x.clone();
                 x_new.increment(&p, alpha);
-                (f1, g_new) = self.eval_deriv(field, &x_new, slope, cap, s)?;
+                (f1, g_new) = self.eval_deriv(field, &x_new, slope, caps, s)?;
                 if f1 - f0 < 1e-4 * alpha * pg {
                     break;
                 }
@@ -759,7 +821,7 @@ impl<'a> Searcher<'a> {
                 field,
                 &mut candidate,
                 SLOPE,
-                settings.hunt_cap,
+                settings.hunt_caps,
                 settings.local_steps,
                 &mut s,
             )?;
@@ -773,7 +835,7 @@ impl<'a> Searcher<'a> {
                         field,
                         &mut current,
                         SLOPE,
-                        AUTHENTIC_CAP,
+                        AUTHENTIC,
                         settings.local_steps,
                         &mut s,
                     )?;
@@ -826,7 +888,7 @@ impl<'a> Searcher<'a> {
                     exact,
                     &mut pose.conf,
                     slope,
-                    AUTHENTIC_CAP,
+                    AUTHENTIC,
                     settings.local_steps,
                     &mut s,
                 )?;
@@ -835,7 +897,7 @@ impl<'a> Searcher<'a> {
                 }
             }
             pose.e = self
-                .eval_deriv(exact, &pose.conf, SLOPE, AUTHENTIC_CAP, &mut s)?
+                .eval_deriv(exact, &pose.conf, SLOPE, AUTHENTIC, &mut s)?
                 .0;
             pose.heavy = self.heavy_coords(&pose.conf, &mut s);
         }
@@ -1006,7 +1068,7 @@ mod tests {
                 }
                 conf.position = 0.3 * random_inside_sphere(&mut rng);
                 let (f0, g) = searcher
-                    .eval_deriv(field, &conf, SLOPE, AUTHENTIC_CAP, &mut s)
+                    .eval_deriv(field, &conf, SLOPE, AUTHENTIC, &mut s)
                     .unwrap();
                 for k in 0..n {
                     let mut e = DVector::zeros(n);
@@ -1018,7 +1080,7 @@ mod tests {
                     minus.increment(&e, -h);
                     let mut eval = |c: &Conf| {
                         searcher
-                            .eval_deriv(field, c, SLOPE, AUTHENTIC_CAP, &mut s)
+                            .eval_deriv(field, c, SLOPE, AUTHENTIC, &mut s)
                             .unwrap()
                             .0
                     };
