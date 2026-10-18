@@ -304,14 +304,13 @@ impl GridSet {
             .cloned()
             .collect();
 
-        let grids = probes
-            .iter()
-            .map(|probe| {
-                let mut grid = Grid::new(origin, spacing, dimensions, probe.atom_type)?;
-                fill_grid(&mut grid, probe, &receptor, forcefield, cutoff)?;
-                Ok(grid)
-            })
-            .collect::<Result<Vec<_>, GridError>>()?;
+        let grids = match probes.first() {
+            Some(first) => {
+                let template = Grid::new(origin, spacing, dimensions, first.atom_type)?;
+                fill_grids(&template, &probes, &receptor, forcefield, cutoff)?
+            }
+            None => Vec::new(),
+        };
 
         Ok(Some(Self {
             grids,
@@ -407,55 +406,179 @@ fn pairwise_energy(
     Ok(total)
 }
 
-/// Fill every point of `grid` with the energy of `probe` placed there.
+/// Resolution of the radial pair-energy tables, in Angstroms.
 ///
-/// Parallel over x-slabs. Each slab, then each row, narrows the receptor list
-/// to atoms within `cutoff` along that axis, so the innermost loop only sees
-/// a thin tube of candidates rather than the whole receptor.
-fn fill_grid(
-    grid: &mut Grid,
-    probe: &Atom,
+/// Linear interpolation at this step is accurate to ~1e-6 kcal/mol on the
+/// smooth terms and ~2e-4 at the kinks of piecewise-linear ones, far below the
+/// trilinear error of the grid itself.
+const TABLE_STEP: f64 = 1.0 / 1024.0;
+
+/// Pair energy against distance for every (receptor class, ligand class)
+/// pair, sampled every [`TABLE_STEP`] up to the cutoff.
+///
+/// Laid out as `[receptor class][sample][ligand class]`, so one receptor atom
+/// at one distance reads its contribution to every ligand class from two
+/// contiguous runs.
+struct RadialTables {
+    data: Vec<f64>,
+    samples: usize,
+    classes: usize,
+}
+
+impl RadialTables {
+    fn build(
+        probes: &[Atom],
+        receptor_classes: &[Atom],
+        forcefield: &dyn ForceField,
+        cutoff: f64,
+    ) -> Result<Self, ForceFieldError> {
+        // One sample past the cutoff, so the upper interpolation neighbour of
+        // any distance <= cutoff exists.
+        let samples = (cutoff / TABLE_STEP).floor() as usize + 2;
+        let classes = probes.len();
+        let mut data = Vec::with_capacity(receptor_classes.len() * samples * classes);
+        for rec in receptor_classes {
+            for k in 0..samples {
+                // Clamped to the range the grid fill evaluates, so samples
+                // outside it carry the edge value rather than a cutoff zero.
+                let r = (k as f64 * TABLE_STEP).clamp(MIN_DISTANCE, cutoff);
+                for probe in probes {
+                    data.push(forcefield.atom_pair_energy(probe, rec, r)?);
+                }
+            }
+        }
+        Ok(Self {
+            data,
+            samples,
+            classes,
+        })
+    }
+
+    /// Add the energy of receptor class `rec` at distance `r` to `out`, one
+    /// entry per ligand class.
+    #[inline]
+    fn accumulate(&self, rec: usize, r: f64, out: &mut [f64]) {
+        let x = r / TABLE_STEP;
+        let k = (x as usize).min(self.samples - 2);
+        let t = x - k as f64;
+        let base = (rec * self.samples + k) * self.classes;
+        let (lo, hi) = self.data[base..base + 2 * self.classes].split_at(self.classes);
+        for ((v, a), b) in out.iter_mut().zip(lo).zip(hi) {
+            *v += a + t * (b - a);
+        }
+    }
+}
+
+/// Pairs closer than this are skipped, as in exact scoring.
+const MIN_DISTANCE: f64 = 0.01;
+
+/// Fill one grid per probe with the probe's energy at every grid point, in a
+/// single sweep over the receptor.
+///
+/// Parallel over x-slabs. Each row keeps only receptor atoms within `cutoff`
+/// of the row's axis, sorted by z, and each point then reads the window of
+/// that list within `cutoff` in z. Every pair costs one square root and a
+/// table lookup per probe, with no force-field call.
+fn fill_grids(
+    template: &Grid,
+    probes: &[Atom],
     receptor: &[Atom],
     forcefield: &dyn ForceField,
     cutoff: f64,
-) -> Result<(), GridError> {
-    let (ny, nz) = (grid.dimensions.y, grid.dimensions.z);
-    let (origin, spacing) = (grid.origin, grid.spacing);
+) -> Result<Vec<Grid>, GridError> {
+    let table_error =
+        |e: ForceFieldError| GridError::ParseError(format!("grid energy evaluation failed: {e}"));
 
-    grid.data
-        .par_chunks_mut(ny * nz)
+    // Receptor atoms by class, dropping any too far from the grid to matter.
+    let lo = template.origin - Vector3::repeat(cutoff);
+    let hi = template.origin
+        + template.dimensions.map(|n| (n - 1) as f64) * template.spacing
+        + Vector3::repeat(cutoff);
+    let mut class_keys: Vec<ProbeKey> = Vec::new();
+    let mut class_atoms: Vec<Atom> = Vec::new();
+    let mut sites: Vec<(Vector3<f64>, usize)> = Vec::new();
+    for atom in receptor {
+        let p = atom.coordinates;
+        if (0..3).any(|i| p[i] < lo[i] || p[i] > hi[i]) {
+            continue;
+        }
+        let key = ProbeKey::of(atom);
+        let class = class_keys
+            .iter()
+            .position(|k| *k == key)
+            .unwrap_or_else(|| {
+                class_keys.push(key);
+                class_atoms.push(atom.clone());
+                class_keys.len() - 1
+            });
+        sites.push((p, class));
+    }
+    let tables =
+        RadialTables::build(probes, &class_atoms, forcefield, cutoff).map_err(table_error)?;
+
+    let n = probes.len();
+    let (ny, nz) = (template.dimensions.y, template.dimensions.z);
+    let (origin, spacing) = (template.origin, template.spacing);
+    let cutoff2 = cutoff * cutoff;
+    let min2 = MIN_DISTANCE * MIN_DISTANCE;
+
+    // Interleaved `[x][y][z][probe]`, so a point's values are contiguous.
+    let mut values = vec![0.0; template.data.len() * n];
+    values
+        .par_chunks_mut(ny * nz * n)
         .enumerate()
-        .try_for_each(|(ix, slab)| {
+        .for_each(|(ix, slab)| {
             let x = origin.x + ix as f64 * spacing;
-            let near_x: Vec<&Atom> = receptor
+            let near_x: Vec<(Vector3<f64>, usize)> = sites
                 .iter()
-                .filter(|a| (a.coordinates.x - x).abs() <= cutoff)
+                .copied()
+                .filter(|(p, _)| (p.x - x).abs() <= cutoff)
                 .collect();
-            let mut probe = probe.clone();
+            // (z, squared distance from the row's axis, class)
+            let mut row_sites: Vec<(f64, f64, usize)> = Vec::with_capacity(near_x.len());
 
-            for (iy, row) in slab.chunks_mut(nz).enumerate() {
+            for (iy, row) in slab.chunks_mut(nz * n).enumerate() {
                 let y = origin.y + iy as f64 * spacing;
-                let near_xy: Vec<&Atom> = near_x
-                    .iter()
-                    .copied()
-                    .filter(|a| (a.coordinates.y - y).abs() <= cutoff)
-                    .collect();
+                row_sites.clear();
+                for (p, class) in &near_x {
+                    let axial2 = (p.x - x).powi(2) + (p.y - y).powi(2);
+                    if axial2 <= cutoff2 {
+                        row_sites.push((p.z, axial2, *class));
+                    }
+                }
+                row_sites.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
 
-                for (iz, value) in row.iter_mut().enumerate() {
-                    probe.coordinates = Vector3::new(x, y, origin.z + iz as f64 * spacing);
-                    let mut total = 0.0;
-                    for rec_atom in &near_xy {
-                        let distance = probe.distance(rec_atom);
-                        if distance > 0.01 && distance <= cutoff {
-                            total += forcefield.atom_pair_energy(&probe, rec_atom, distance)?;
+                let (mut first, mut last) = (0, 0);
+                for (iz, point) in row.chunks_mut(n).enumerate() {
+                    let z = origin.z + iz as f64 * spacing;
+                    while first < row_sites.len() && row_sites[first].0 < z - cutoff {
+                        first += 1;
+                    }
+                    while last < row_sites.len() && row_sites[last].0 <= z + cutoff {
+                        last += 1;
+                    }
+                    for &(sz, axial2, class) in &row_sites[first..last] {
+                        let r2 = axial2 + (sz - z).powi(2);
+                        if r2 > min2 && r2 <= cutoff2 {
+                            tables.accumulate(class, r2.sqrt(), point);
                         }
                     }
-                    *value = total;
                 }
             }
-            Ok::<(), ForceFieldError>(())
+        });
+
+    probes
+        .iter()
+        .enumerate()
+        .map(|(i, probe)| {
+            let mut grid = template.clone();
+            grid.atom_type = probe.atom_type;
+            for (v, point) in grid.data.iter_mut().zip(values.chunks_exact(n)) {
+                *v = point[i];
+            }
+            Ok(grid)
         })
-        .map_err(|e| GridError::ParseError(format!("grid energy evaluation failed: {e}")))
+        .collect()
 }
 
 #[cfg(test)]
@@ -526,8 +649,83 @@ mod tests {
         let grids = build(&ligand, 0.5);
         let ff = VinaForceField::default();
 
+        // On grid points only the radial tables' interpolation separates the
+        // two.
         let grid_energy = grids.energy(&ligand, &ff).unwrap();
-        assert!((grid_energy - exact(&ligand, &receptor(), &ff)).abs() < 1e-9);
+        assert!((grid_energy - exact(&ligand, &receptor(), &ff)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_every_grid_point_matches_pairwise() {
+        // A receptor dense and varied enough to exercise every term,
+        // including the hydrophobic and H-bond ramps of flagged atoms.
+        let types = [
+            AtomType::Carbon,
+            AtomType::OxygenH,
+            AtomType::NitrogenH,
+            AtomType::Nitrogen,
+            AtomType::SulfurH,
+        ];
+        let mut rec = Molecule::new("rec");
+        let mut state = 7u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for i in 0..60 {
+            let mut a = atom(
+                types[i % types.len()],
+                next() * 16.0 - 8.0,
+                next() * 16.0 - 8.0,
+                next() * 16.0 - 8.0,
+            );
+            a.is_hydrophobic = a.atom_type == AtomType::Carbon && i % 2 == 0;
+            a.is_hbond_donor = a.atom_type == AtomType::NitrogenH && i % 3 == 0;
+            rec.add_atom(a);
+        }
+        let mut ligand = ligand_at(&[
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(2.0, 0.0, 0.0),
+            Vector3::new(3.0, 0.0, 0.0),
+        ]);
+        ligand.atoms[0].is_hydrophobic = true;
+        ligand.atoms[2].is_hydrophobic = false;
+        ligand.atoms[3].is_hbond_donor = true;
+        let ff = VinaForceField::default();
+        let grids = GridSet::build(
+            &ligand,
+            &rec,
+            &ff,
+            &Vector3::zeros(),
+            &Vector3::repeat(10.0),
+            0.0,
+            0.5,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(grids.len(), 4);
+
+        let mut worst: f64 = 0.0;
+        for (atom, g) in ligand.atoms.iter().zip(&grids.atom_grid) {
+            let grid = &grids.grids[g.unwrap()];
+            let d = grid.dimensions;
+            for ix in 0..d.x {
+                for iy in 0..d.y {
+                    for iz in 0..d.z {
+                        let mut probe = atom.clone();
+                        probe.coordinates = grid.origin
+                            + Vector3::new(ix as f64, iy as f64, iz as f64) * grid.spacing;
+                        let expected = pairwise_energy(&probe, &rec.atoms, &ff).unwrap();
+                        let got = grid.get_value_at_indices(ix, iy, iz).unwrap();
+                        worst = worst.max((got - expected).abs() / expected.abs().max(1.0));
+                    }
+                }
+            }
+        }
+        assert!(worst < 1e-3, "worst relative grid error {worst}");
     }
 
     #[test]
@@ -548,12 +746,14 @@ mod tests {
     fn test_atoms_outside_grid_are_scored_exactly() {
         // 7.5 is outside the [-6, 6] box but within the 8 A cutoff of the
         // receptor oxygen, so a silent zero would be wrong.
-        let ligand = ligand_at(&[Vector3::new(7.5, 0.0, 0.0), Vector3::new(1.5, 3.0, -2.0)]);
-        let grids = build(&ligand, 0.5);
+        let outside = ligand_at(&[Vector3::new(7.5, 0.0, 0.0)]);
+        let grids = build(&outside, 0.5);
         let ff = VinaForceField::default();
 
-        let grid_energy = grids.energy(&ligand, &ff).unwrap();
-        assert!((grid_energy - exact(&ligand, &receptor(), &ff)).abs() < 1e-9);
+        let grid_energy = grids.energy(&outside, &ff).unwrap();
+        let exact_energy = exact(&outside, &receptor(), &ff);
+        assert!(exact_energy != 0.0, "test point must feel the receptor");
+        assert!((grid_energy - exact_energy).abs() < 1e-12);
     }
 
     #[test]
