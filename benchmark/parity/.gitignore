@@ -1,0 +1,5 @@
+# Local tool installs and per-run outputs; see README.md to recreate them.
+.venv/
+bin/
+work/
+__pycache__/

@@ -202,7 +202,7 @@ fn parse_pdbqt_atom(line: &str, line_number: usize) -> Result<Atom, IoError> {
     // Parse residue number
     let residue_num = line[22..26]
         .trim()
-        .parse::<u32>()
+        .parse::<i32>()
         .map_err(|_| IoError::Parse {
             line: line_number,
             message: format!("Invalid residue number: {}", &line[22..26]),
@@ -415,4 +415,20 @@ pub fn write_docking_results<P: AsRef<Path>>(
     writeln!(file, "END")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_negative_residue_number() {
+        // PDB allows negative residue numbers (e.g. tags before residue 1),
+        // and Open Babel writes them through to receptor PDBQTs.
+        let line =
+            "ATOM      1  N   PHE A  -1      21.700  33.210  12.363  0.00  0.00    +0.000 NA";
+        let atom = parse_pdbqt_atom(line, 1).unwrap();
+        assert_eq!(atom.residue_num, -1);
+        assert_eq!(atom.residue_name, "PHE");
+    }
 }

@@ -1,0 +1,10 @@
+# Python side of the parity benchmark. Install with:
+#   uv venv --python 3.12 benchmark/parity/.venv
+#   uv pip install --python benchmark/parity/.venv -r benchmark/parity/requirements.txt
+meeko==0.6.1
+rdkit==2025.3.6
+gemmi==0.7.3
+posebusters==0.4.6
+pandas==2.3.3
+numpy<2.3
+scipy
