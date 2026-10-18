@@ -71,11 +71,12 @@ impl<'a> VinaScore<'a> {
     /// Predicted binding affinity in kcal/mol.
     ///
     /// This is the intermolecular energy divided by `1 + w_rot * N_rot`, the
-    /// same quantity Vina prints as `VINA RESULT`.
+    /// same quantity Vina prints as `VINA RESULT`, with `N_rot` Vina's
+    /// weighted torsion count.
     pub fn affinity(&self, receptor: &Molecule) -> Result<f64, crate::Error> {
         let inter = self.intermolecular_energy(receptor)?;
         Ok(self
             .forcefield
-            .calculate_affinity(inter, self.molecule.torsions.len()))
+            .calculate_affinity(inter, self.molecule.vina_torsion_count()))
     }
 }

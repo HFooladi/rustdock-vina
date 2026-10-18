@@ -102,14 +102,14 @@ impl VinaForceField {
         self.params.weight_rot * num_rotatable_bonds as f64
     }
 
-    /// Calculate the full interaction energy and apply torsional normalization
-    /// affinity = (intermolecular_energy) / (1 + weight_rot * N_rot)
-    pub fn calculate_affinity(
-        &self,
-        intermolecular_energy: f64,
-        num_rotatable_bonds: usize,
-    ) -> f64 {
-        let divisor = 1.0 + self.params.weight_rot * num_rotatable_bonds as f64;
+    /// Apply Vina's torsional normalization:
+    /// affinity = intermolecular_energy / (1 + weight_rot * num_tors)
+    ///
+    /// `num_tors` is Vina's weighted torsion count,
+    /// [`Molecule::vina_torsion_count`](crate::molecule::Molecule::vina_torsion_count),
+    /// not the number of torsions.
+    pub fn calculate_affinity(&self, intermolecular_energy: f64, num_tors: f64) -> f64 {
+        let divisor = 1.0 + self.params.weight_rot * num_tors;
         intermolecular_energy / divisor
     }
 }
@@ -258,13 +258,9 @@ impl ForceField for VinaForceField {
         Ok(0.0)
     }
 
-    /// Apply Vina's torsional normalization: affinity = energy / (1 + weight_rot * N_rot)
-    fn apply_torsional_normalization(
-        &self,
-        intermolecular_energy: f64,
-        num_rotatable_bonds: usize,
-    ) -> f64 {
-        self.calculate_affinity(intermolecular_energy, num_rotatable_bonds)
+    /// Apply Vina's torsional normalization: affinity = energy / (1 + weight_rot * num_tors)
+    fn apply_torsional_normalization(&self, intermolecular_energy: f64, num_tors: f64) -> f64 {
+        self.calculate_affinity(intermolecular_energy, num_tors)
     }
 
     /// Vina's terms are functions of `xs` type and distance only, which is

@@ -32,6 +32,17 @@ pub enum AtomType {
     Magnesium, // Mg
     Iron,      // Fe
 
+    // Metals that are not AutoDock 4 types; Vina scores them all as generic
+    // metals (`Met_D`), matching the names case-sensitively.
+    Sodium,    // Na
+    Potassium, // K
+    Copper,    // Cu
+    Nickel,    // Ni
+    Cobalt,    // Co
+    Cadmium,   // Cd
+    Mercury,   // Hg
+    Uranium,   // U
+
     // Zinc pseudo-atom
     ZincPseudo, // TZ
 
@@ -63,6 +74,15 @@ impl AtomType {
             AtomType::Manganese => 1.2,
             AtomType::Magnesium => 1.2,
             AtomType::Iron => 1.2,
+            // Vina's generic metal radius
+            AtomType::Sodium
+            | AtomType::Potassium
+            | AtomType::Copper
+            | AtomType::Nickel
+            | AtomType::Cobalt
+            | AtomType::Cadmium
+            | AtomType::Mercury
+            | AtomType::Uranium => 1.2,
             AtomType::ZincPseudo => 0.25,
             AtomType::Unknown => 1.9, // Default to carbon radius
         }
@@ -70,6 +90,20 @@ impl AtomType {
 
     /// Parse atom type from string representation in PDBQT format
     pub fn from_pdbqt_string(s: &str) -> Self {
+        // Vina matches type names case-sensitively, which is what tells
+        // sodium (`Na`) from an acceptor nitrogen (`NA`). Its non-AD4 metals
+        // are matched exactly first; everything else stays case-insensitive.
+        match s.trim() {
+            "Na" => return AtomType::Sodium,
+            "K" => return AtomType::Potassium,
+            "Cu" => return AtomType::Copper,
+            "Ni" => return AtomType::Nickel,
+            "Co" => return AtomType::Cobalt,
+            "Cd" => return AtomType::Cadmium,
+            "Hg" => return AtomType::Mercury,
+            "U" => return AtomType::Uranium,
+            _ => {}
+        }
         match s.trim().to_uppercase().as_str() {
             "A" => AtomType::Carbon, // Aromatic carbon - same as aliphatic in Vina
             "C" => AtomType::Carbon,
@@ -115,13 +149,40 @@ impl AtomType {
 
     /// Whether this element accepts hydrogen bonds.
     ///
-    /// Vina treats only the acceptor-flagged PDBQT types (`NA`/`OA`/`SA`) as
-    /// acceptors. Plain `N`/`O`/`S` are non-polar in this sense and are
-    /// deliberately excluded.
+    /// Vina treats only the acceptor-flagged PDBQT types `NA` and `OA` as
+    /// acceptors. `SA` is not one ("X-Score formulation apparently ignores
+    /// SA", `model::assign_types`), and plain `N`/`O`/`S` are non-polar.
     pub fn is_hbond_acceptor(&self) -> bool {
+        matches!(self, AtomType::NitrogenH | AtomType::OxygenH)
+    }
+
+    /// Whether this is a nitrogen or oxygen of any PDBQT type, the elements
+    /// Vina lets donate a hydrogen bond through a bonded polar hydrogen.
+    pub fn is_nitrogen_or_oxygen(&self) -> bool {
         matches!(
             self,
-            AtomType::NitrogenH | AtomType::OxygenH | AtomType::SulfurH
+            AtomType::Nitrogen | AtomType::NitrogenH | AtomType::Oxygen | AtomType::OxygenH
+        )
+    }
+
+    /// Whether this is a metal. Vina types every metal `Met_D`: a hydrogen-bond
+    /// donor and a heteroatom.
+    pub fn is_metal(&self) -> bool {
+        matches!(
+            self,
+            AtomType::Zinc
+                | AtomType::Calcium
+                | AtomType::Manganese
+                | AtomType::Magnesium
+                | AtomType::Iron
+                | AtomType::Sodium
+                | AtomType::Potassium
+                | AtomType::Copper
+                | AtomType::Nickel
+                | AtomType::Cobalt
+                | AtomType::Cadmium
+                | AtomType::Mercury
+                | AtomType::Uranium
         )
     }
 
@@ -131,16 +192,17 @@ impl AtomType {
     }
 
     /// Whether this is a heteroatom for the purpose of the `C_H`/`C_P` split.
+    ///
+    /// As Vina's `ad_is_heteroatom` plus metals: every type but carbon and
+    /// hydrogen, so a carbon bonded to a halogen or a metal is polar too.
     pub fn is_heteroatom(&self) -> bool {
-        matches!(
+        !matches!(
             self,
-            AtomType::Nitrogen
-                | AtomType::NitrogenH
-                | AtomType::Oxygen
-                | AtomType::OxygenH
-                | AtomType::Sulfur
-                | AtomType::SulfurH
-                | AtomType::Phosphorus
+            AtomType::Carbon
+                | AtomType::Hydrogen
+                | AtomType::HydrogenD
+                | AtomType::ZincPseudo
+                | AtomType::Unknown
         )
     }
 
@@ -166,6 +228,14 @@ impl AtomType {
             AtomType::Manganese => "Mn",
             AtomType::Magnesium => "Mg",
             AtomType::Iron => "Fe",
+            AtomType::Sodium => "Na",
+            AtomType::Potassium => "K",
+            AtomType::Copper => "Cu",
+            AtomType::Nickel => "Ni",
+            AtomType::Cobalt => "Co",
+            AtomType::Cadmium => "Cd",
+            AtomType::Mercury => "Hg",
+            AtomType::Uranium => "U",
             AtomType::ZincPseudo => "TZ",
             AtomType::Unknown => "X",
         }
@@ -305,6 +375,29 @@ mod tests {
         assert_eq!(AtomType::from_pdbqt_string("HD"), AtomType::HydrogenD);
         assert_eq!(AtomType::from_pdbqt_string("TZ"), AtomType::ZincPseudo);
         assert_eq!(AtomType::from_pdbqt_string("UNKNOWN"), AtomType::Unknown);
+    }
+
+    #[test]
+    fn test_metal_names_are_case_sensitive() {
+        // Open Babel writes sodium as `Na`; upper-casing it made it an
+        // acceptor nitrogen. Vina matches type names exactly.
+        assert_eq!(AtomType::from_pdbqt_string("Na"), AtomType::Sodium);
+        assert_eq!(AtomType::from_pdbqt_string("NA"), AtomType::NitrogenH);
+        assert_eq!(AtomType::from_pdbqt_string("K"), AtomType::Potassium);
+        assert_eq!(AtomType::from_pdbqt_string("Cu"), AtomType::Copper);
+        assert_eq!(AtomType::from_pdbqt_string("Ca"), AtomType::Calcium);
+        for metal in [AtomType::Sodium, AtomType::Copper, AtomType::Zinc] {
+            assert!(metal.is_metal());
+            assert_eq!(AtomType::from_pdbqt_string(metal.to_pdbqt_string()), metal);
+        }
+    }
+
+    #[test]
+    fn test_vina_acceptors_are_na_and_oa_only() {
+        assert!(AtomType::NitrogenH.is_hbond_acceptor());
+        assert!(AtomType::OxygenH.is_hbond_acceptor());
+        assert!(!AtomType::SulfurH.is_hbond_acceptor());
+        assert!(!AtomType::Nitrogen.is_hbond_acceptor());
     }
 
     #[test]

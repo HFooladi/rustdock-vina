@@ -254,16 +254,13 @@ fn main() -> Result<()> {
                     mc_steps(&ligand_molecule),
                 )?;
 
-                // Apply torsional normalization: affinity = energy / (1 + weight_rot * N_rot)
-                let num_rotatable_bonds = ligand_molecule.torsions.len();
-                let weight_rot = 0.05846;
-                let divisor = 1.0 + weight_rot * num_rotatable_bonds as f64;
-
-                // Normalize energies and filter results
+                // Apply the force field's torsional normalization (Vina:
+                // affinity = energy / (1 + weight_rot * num_tors))
+                let num_tors = ligand_molecule.vina_torsion_count();
                 let normalized_results: Vec<_> = results
                     .into_iter()
                     .map(|mut r| {
-                        r.energy /= divisor; // Apply torsional normalization
+                        r.energy = forcefield.apply_torsional_normalization(r.energy, num_tors);
                         r
                     })
                     .collect();
@@ -373,12 +370,11 @@ fn main() -> Result<()> {
                 }
             }
 
-            // Vina formula: affinity = intermolecular / (1 + weight_rot * N_rot)
+            // Vina formula: affinity = intermolecular / (1 + weight_rot * num_tors)
             // The internal energy cancels with unbound energy in the full formula
-            let num_rotatable_bonds = ligand_molecule.torsions.len();
-            let weight_rot = 0.05846;
-            let divisor = 1.0 + weight_rot * num_rotatable_bonds as f64;
-            let affinity = intermolecular_energy / divisor;
+            let num_tors = ligand_molecule.vina_torsion_count();
+            let affinity =
+                forcefield.apply_torsional_normalization(intermolecular_energy, num_tors);
             let torsional_effect = intermolecular_energy - affinity;
 
             println!("\nScoring breakdown:");
@@ -387,8 +383,10 @@ fn main() -> Result<()> {
             println!("  Negative energy (attraction): {:.3}", negative_energy);
             println!("  Intermolecular energy: {:.3}", intermolecular_energy);
             println!(
-                "  Torsional effect: {:.3} ({} rotatable bonds)",
-                torsional_effect, num_rotatable_bonds
+                "  Torsional effect: {:.3} ({} torsions, weighted count {})",
+                torsional_effect,
+                ligand_molecule.torsions.len(),
+                num_tors
             );
             println!("\nAffinity: {:.3} (kcal/mol)", affinity);
             info!("Scoring completed successfully");

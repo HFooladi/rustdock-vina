@@ -30,6 +30,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pose is within 2 A of the crystal pose for 15/16 seeds.
 
 ### Fixed
+- Vina scoring now matches AutoDock Vina 1.2.7 exactly. Rescoring the 29
+  CASF-2016 pilot crystal poses, the median gap fell from 1.73 to 0.003
+  kcal/mol (max 6.57 to 0.012), and pilot top-1 docking success rose from
+  8/29 to 11/29 (Vina: 16/29). Typing now follows Vina's
+  `model::assign_types`:
+  - any N or O bonded to a polar hydrogen is a donor, not only `NA`/`OA`,
+    which had dropped every backbone N-H and amide/amine donor;
+  - metals are donors;
+  - `SA` is not an acceptor;
+  - halogens and metals count as heteroatoms, so carbons bonded to them are
+    polar, not hydrophobic;
+  - sodium (`Na`) parsed as an acceptor nitrogen (`NA`); type names are now
+    case-sensitive like Vina's, which adds Vina's other metals (K, Cu, Ni, Co,
+    Cd, Hg, U).
+- Affinity divides by Vina's weighted torsion count
+  (`Molecule::vina_torsion_count`: torsions that only spin a terminal group
+  count 0.5) instead of the number of torsions. `calculate_affinity` and
+  `ForceField::apply_torsional_normalization` take it as `f64`. `dock` and
+  `score` use the force field's normalization rather than Vina's weight for
+  every force field.
 - PDBQT files with negative residue numbers (legal in PDB, and written by
   Open Babel) failed to parse. `Atom::residue_num` is now `i32`.
 - Per-run seeds in `generate_poses` were `master + i`, so docks with nearby
