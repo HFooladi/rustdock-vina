@@ -2,9 +2,9 @@
 
 pub mod ad4;
 pub mod vina;
+pub mod vinardo;
 use crate::atom::{Atom, AtomType};
 use nalgebra::Vector3;
-/// pub mod vinardo;
 use thiserror::Error;
 
 /// Errors that can occur in forcefields

@@ -38,6 +38,9 @@ Subsets of `casf2016_coreset.tsv`:
 Steps cache under `work/<code>/`, so a rerun resumes where it stopped.
 `parity.py report` rebuilds the table from `work/results.csv`.
 
+`--scoring vinardo` compares both programs' Vinardo instead (work directory
+`work-vinardo/`, report `PARITY_<subset>_vinardo.md`).
+
 ## Protocol
 
 | Step | How |
