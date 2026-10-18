@@ -191,7 +191,7 @@ pub struct Atom {
     pub residue_name: String,
 
     /// Residue number this atom belongs to
-    pub residue_num: u32,
+    pub residue_num: i32,
 
     /// Chain identifier
     pub chain_id: char,
@@ -230,7 +230,7 @@ impl Atom {
         name: String,
         serial: u32,
         residue_name: String,
-        residue_num: u32,
+        residue_num: i32,
         chain_id: char,
         charge: f64,
     ) -> Self {

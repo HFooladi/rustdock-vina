@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `benchmark/parity/`: a CASF-2016 docking parity harness against AutoDock
+  Vina 1.2.7. Both programs dock identical Meeko/Open Babel-prepared inputs;
+  the report gives top-1 success, symmetry-aware RMSD, PoseBusters validity,
+  wall time and crystal-pose rescoring per complex. Tools install with uv.
+- `dock --seed` makes a docking run reproducible.
 - The docking search now scores ligand-receptor energy from precomputed
   per-atom-class affinity grids (`GridSet`), as Vina does, instead of summing
   over receptor atoms for every pose. The final polish of each run and all
@@ -25,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pose is within 2 A of the crystal pose for 15/16 seeds.
 
 ### Fixed
+- PDBQT files with negative residue numbers (legal in PDB, and written by
+  Open Babel) failed to parse. `Atom::residue_num` is now `i32`.
 - Per-run seeds in `generate_poses` were `master + i`, so docks with nearby
   master seeds repeated most of their runs (masters 0-15 over 8 runs shared
   just 23 distinct seeds). Run seeds are now mixed with splitmix64.

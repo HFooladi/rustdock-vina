@@ -81,6 +81,10 @@ enum Commands {
         /// Search on exact pairwise energies instead of precomputed grids (slow)
         #[clap(long)]
         no_grid: bool,
+
+        /// Random seed; the same seed and inputs reproduce the same poses
+        #[clap(long)]
+        seed: Option<u64>,
     },
 
     /// Score an existing pose
@@ -130,6 +134,7 @@ fn main() -> Result<()> {
             energy_range,
             grid_spacing,
             no_grid,
+            seed,
         } => {
             // Determine scoring function
             let forcefield = select_forcefield(&scoring)?;
@@ -211,6 +216,7 @@ fn main() -> Result<()> {
             let optimizer = MonteCarlo::with_params(MonteCarloParams {
                 use_grid: !no_grid,
                 grid_spacing,
+                seed,
                 ..MonteCarloParams::default()
             });
 

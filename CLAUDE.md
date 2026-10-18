@@ -60,6 +60,7 @@ tests/
 ├── integration_tests.rs  # 8 integration tests covering parsing, scoring, optimization, output
 └── test_data/            # receptor.pdbqt, ligand.pdbqt
 benches/                  # Criterion benchmarks: docking, grid, optimization, scoring
+benchmark/parity/         # CASF-2016 parity vs AutoDock Vina (Python, uv venv); see its README
 ```
 
 ### Key Types
