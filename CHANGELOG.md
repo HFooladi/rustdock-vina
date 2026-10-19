@@ -35,6 +35,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `max_steps` the Monte Carlo steps per chain (`0` for Vina's default).
 
 ### Added
+- Batch screening: `dock --batch <files or dirs> --dir <out>` docks many
+  ligands into one box in parallel, sharing one set of receptor grids, and
+  writes `scores.tsv` with every best affinity. A ligand that fails is
+  listed with its error and skipped. `--cpu` sets the thread count. Each
+  ligand's poses are identical to docking it alone with the same seed. 100
+  CASF-2016 ligands into 1e66's pocket on 96 threads took 141 s, against
+  1024 s for Vina 1.2.7's `--batch` and 210 s for 12 parallel Vina
+  processes of 8 threads; best affinities agree with Vina's at Pearson
+  0.98. Library API: `MonteCarlo::target` and `MonteCarlo::dock_into`, with
+  grids shared through `grid::ReceptorGrids`.
 - Vinardo scoring (`--scoring vinardo`, `VinardoForceField`), following
   AutoDock Vina 1.2.7: Vina's typing and torsional term with Vinardo's radii,
   one Gaussian, and its hydrophobic and H-bond ramps. On the CASF-2016 pilot

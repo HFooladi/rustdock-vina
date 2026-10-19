@@ -8,7 +8,7 @@ use nalgebra::Vector3;
 use rand::prelude::*;
 
 use crate::forcefield::ForceField;
-use crate::grid::{pairwise_energy_and_gradient, GridSet};
+use crate::grid::{pairwise_energy_and_gradient, GridSet, ReceptorGrids};
 use crate::molecule::Molecule;
 use crate::optimization::vina_search::{
     vina_global_steps, vina_local_steps, Caps, ExactField, GridField, InterField, SearchBox,
@@ -112,27 +112,18 @@ impl MonteCarlo {
         vina_global_steps(ligand)
     }
 
-    /// Dock `ligand`: up to `num_modes` distinct poses, best first, from
-    /// `steps` Monte Carlo steps per chain (`0` for Vina's default).
-    #[allow(clippy::too_many_arguments)]
-    fn dock(
+    /// The receptor and search box for docking with these parameters, with
+    /// grids shared by every ligand docked into it (see [`Target`]).
+    pub fn target(
         &self,
-        ligand: &Molecule,
-        receptor: &Molecule,
+        receptor: Molecule,
         forcefield: &dyn ForceField,
         center: Vector3<f64>,
         box_size: Vector3<f64>,
-        num_modes: usize,
-        steps: usize,
-    ) -> Result<Vec<DockingResult>, OptimizationError> {
-        // Receptor atoms too far from the box can never interact with any
-        // pose inside it, so drop them once.
-        let pruned = prune_receptor(receptor, &center, &box_size, ligand);
-        let search_box = SearchBox::new(&center, &box_size, self.params.grid_spacing);
+    ) -> Result<Target, OptimizationError> {
         let grids = if self.params.use_grid {
-            GridSet::build(
-                ligand,
-                &pruned,
+            ReceptorGrids::new(
+                &receptor,
                 forcefield,
                 &center,
                 &box_size,
@@ -141,6 +132,36 @@ impl MonteCarlo {
             )?
         } else {
             None
+        };
+        Ok(Target {
+            receptor,
+            center,
+            box_size,
+            grids,
+        })
+    }
+
+    /// Dock `ligand` into `target`, which must have been made by
+    /// [`target`](Self::target) with the same force field: up to `num_modes`
+    /// distinct poses, best first, from `steps` Monte Carlo steps per chain
+    /// (`0` for Vina's default). The poses are the same as
+    /// [`Optimizer::generate_poses`] gives.
+    pub fn dock_into(
+        &self,
+        target: &Target,
+        ligand: &Molecule,
+        forcefield: &dyn ForceField,
+        num_modes: usize,
+        steps: usize,
+    ) -> Result<Vec<DockingResult>, OptimizationError> {
+        let (center, box_size) = (target.center, target.box_size);
+        // Receptor atoms too far from the box can never interact with any
+        // pose inside it, so drop them once.
+        let pruned = prune_receptor(&target.receptor, &center, &box_size, ligand);
+        let search_box = SearchBox::new(&center, &box_size, self.params.grid_spacing);
+        let grids = match &target.grids {
+            Some(grids) => Some(grids.grid_set(ligand, forcefield)?),
+            None => None,
         };
         let exact = ExactField::new(&pruned, forcefield, search_box);
         let grid_field = grids.as_ref().map(GridField);
@@ -206,6 +227,26 @@ impl MonteCarlo {
             }
         }
         Ok(results)
+    }
+}
+
+/// A receptor and search box ready for docking, made by
+/// [`MonteCarlo::target`].
+///
+/// Its affinity grids are built as ligands need them and shared by every
+/// ligand docked into it, from any number of threads at once.
+#[derive(Debug)]
+pub struct Target {
+    receptor: Molecule,
+    center: Vector3<f64>,
+    box_size: Vector3<f64>,
+    grids: Option<ReceptorGrids>,
+}
+
+impl Target {
+    /// The receptor.
+    pub fn receptor(&self) -> &Molecule {
+        &self.receptor
     }
 }
 
@@ -344,7 +385,8 @@ impl Optimizer for MonteCarlo {
         box_size: Vector3<f64>,
         max_steps: usize,
     ) -> Result<DockingResult, OptimizationError> {
-        self.dock(ligand, receptor, forcefield, center, box_size, 1, max_steps)?
+        let target = self.target(receptor.clone(), forcefield, center, box_size)?;
+        self.dock_into(&target, ligand, forcefield, 1, max_steps)?
             .into_iter()
             .next()
             .ok_or(OptimizationError::FailedToConverge)
@@ -362,9 +404,8 @@ impl Optimizer for MonteCarlo {
         num_poses: usize,
         max_steps: usize,
     ) -> Result<Vec<DockingResult>, OptimizationError> {
-        self.dock(
-            ligand, receptor, forcefield, center, box_size, num_poses, max_steps,
-        )
+        let target = self.target(receptor.clone(), forcefield, center, box_size)?;
+        self.dock_into(&target, ligand, forcefield, num_poses, max_steps)
     }
 }
 

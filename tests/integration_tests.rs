@@ -317,6 +317,52 @@ fn test_generate_poses_seed_is_deterministic() {
     }
 }
 
+/// Ligands docked in parallel into one shared target get exactly the poses a
+/// dock of each on its own gives, and share the receptor's grids.
+#[test]
+fn test_shared_target_matches_single_docks() {
+    let receptor = parse_pdbqt(test_data_dir().join("receptor.pdbqt")).unwrap();
+    let ligands = [
+        parse_pdbqt(test_data_dir().join("ligand.pdbqt")).unwrap(),
+        parse_pdbqt(test_data_dir().join("ligand_meeko.pdbqt")).unwrap(),
+    ];
+    let forcefield = VinaForceField::default();
+    let optimizer = MonteCarlo::with_params(MonteCarloParams {
+        exhaustiveness: 2,
+        seed: Some(11),
+        ..MonteCarloParams::default()
+    });
+    let center = Vector3::new(5.0, 4.0, 2.0);
+    let box_size = Vector3::new(10.0, 10.0, 10.0);
+
+    let target = optimizer
+        .target(receptor.clone(), &forcefield, center, box_size)
+        .unwrap();
+    let shared: Vec<_> = std::thread::scope(|scope| {
+        let handles: Vec<_> = ligands
+            .iter()
+            .map(|ligand| scope.spawn(|| optimizer.dock_into(&target, ligand, &forcefield, 3, 100)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap().unwrap())
+            .collect()
+    });
+
+    for (ligand, shared) in ligands.iter().zip(&shared) {
+        let single = optimizer
+            .generate_poses(ligand, &receptor, &forcefield, center, box_size, 3, 100)
+            .unwrap();
+        assert_eq!(single.len(), shared.len());
+        for (a, b) in single.iter().zip(shared) {
+            assert_eq!(a.energy, b.energy);
+            for (x, y) in a.molecule.atoms.iter().zip(&b.molecule.atoms) {
+                assert_eq!(x.coordinates, y.coordinates);
+            }
+        }
+    }
+}
+
 #[test]
 fn test_molecule_center_and_bounding_box() {
     let ligand_path = test_data_dir().join("ligand.pdbqt");

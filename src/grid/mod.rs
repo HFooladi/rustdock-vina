@@ -7,6 +7,7 @@ use nalgebra::Vector3;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 /// Errors that can occur when working with grids
@@ -317,14 +318,17 @@ impl ProbeKey {
 ///
 /// Atoms that wander outside the gridded region are scored exactly against
 /// the stored receptor atoms, so leaving the grid costs speed, not accuracy.
+///
+/// The grids themselves are shared: a set built from [`ReceptorGrids`] holds
+/// the receptor's grids, and only its atom-to-grid map is the ligand's own.
 #[derive(Debug, Clone)]
 pub struct GridSet {
-    grids: Vec<Grid>,
+    grids: Vec<Arc<Grid>>,
     /// Grid index for each ligand atom; `None` for atoms that never interact
     /// with the receptor (hydrogens and closure dummies).
     atom_grid: Vec<Option<usize>>,
     /// Receptor heavy atoms, kept for scoring atoms outside the grid.
-    receptor: Vec<Atom>,
+    receptor: Arc<Vec<Atom>>,
 }
 
 impl GridSet {
@@ -343,60 +347,10 @@ impl GridSet {
         margin: f64,
         spacing: f64,
     ) -> Result<Option<Self>, GridError> {
-        let Some(cutoff) = forcefield.grid_cutoff() else {
-            return Ok(None);
-        };
-        if !spacing.is_finite() || spacing <= 0.0 {
-            return Err(GridError::InvalidDimension(format!(
-                "grid spacing must be positive, got {spacing}"
-            )));
+        match ReceptorGrids::new(receptor, forcefield, center, box_size, margin, spacing)? {
+            Some(grids) => grids.grid_set(ligand, forcefield).map(Some),
+            None => Ok(None),
         }
-
-        // As Vina: a whole number of cells spanning the box, centred on it.
-        let cells = (box_size + Vector3::repeat(2.0 * margin))
-            .map(|extent| ((extent / spacing).ceil() as usize).max(1));
-        let origin = center - cells.map(|n| n as f64 * spacing) * 0.5;
-        let dimensions = cells.map(|n| n + 1);
-
-        let mut probes: Vec<Atom> = Vec::new();
-        let mut keys: Vec<ProbeKey> = Vec::new();
-        let atom_grid = ligand
-            .atoms
-            .iter()
-            .map(|atom| {
-                // Vina's grids skip closure dummies as well as hydrogens.
-                if atom.atom_type.is_hydrogen() || atom.atom_type.is_closure_dummy() {
-                    return None;
-                }
-                let key = ProbeKey::of(atom);
-                Some(keys.iter().position(|k| *k == key).unwrap_or_else(|| {
-                    keys.push(key);
-                    probes.push(atom.clone());
-                    keys.len() - 1
-                }))
-            })
-            .collect();
-
-        let receptor: Vec<Atom> = receptor
-            .atoms
-            .iter()
-            .filter(|a| !a.atom_type.is_hydrogen())
-            .cloned()
-            .collect();
-
-        let grids = match probes.first() {
-            Some(first) => {
-                let template = Grid::new(origin, spacing, dimensions, first.atom_type)?;
-                fill_grids(&template, &probes, &receptor, forcefield, cutoff)?
-            }
-            None => Vec::new(),
-        };
-
-        Ok(Some(Self {
-            grids,
-            atom_grid,
-            receptor,
-        }))
     }
 
     /// Number of grids, i.e. distinct interacting atom classes in the ligand.
@@ -470,6 +424,144 @@ impl GridSet {
             *grad += gradient;
         }
         Ok(total)
+    }
+}
+
+/// One receptor's affinity grids over one search box, shared by every ligand
+/// docked into it.
+///
+/// A grid is built the first time a ligand needs its atom class and reused
+/// after that, so docking a library costs one grid per class rather than one
+/// set per ligand. A grid's values do not depend on which other classes were
+/// built with it, so a ligand's [`GridSet`] is the same as
+/// [`GridSet::build`] would give.
+///
+/// Every call must pass the force field the grids were created for.
+#[derive(Debug)]
+pub struct ReceptorGrids {
+    /// Grid geometry; its data is never filled.
+    template: Grid,
+    cutoff: f64,
+    receptor: Arc<Vec<Atom>>,
+    built: Mutex<Vec<(ProbeKey, Arc<Grid>)>>,
+}
+
+impl ReceptorGrids {
+    /// Grids for `receptor` covering the search box widened by `margin` on
+    /// every side; none are filled yet. Returns `Ok(None)` when the force
+    /// field's pair energy cannot be gridded (see [`ForceField::grid_cutoff`]).
+    pub fn new(
+        receptor: &Molecule,
+        forcefield: &dyn ForceField,
+        center: &Vector3<f64>,
+        box_size: &Vector3<f64>,
+        margin: f64,
+        spacing: f64,
+    ) -> Result<Option<Self>, GridError> {
+        let Some(cutoff) = forcefield.grid_cutoff() else {
+            return Ok(None);
+        };
+        if !spacing.is_finite() || spacing <= 0.0 {
+            return Err(GridError::InvalidDimension(format!(
+                "grid spacing must be positive, got {spacing}"
+            )));
+        }
+
+        // As Vina: a whole number of cells spanning the box, centred on it.
+        let cells = (box_size + Vector3::repeat(2.0 * margin))
+            .map(|extent| ((extent / spacing).ceil() as usize).max(1));
+        let origin = center - cells.map(|n| n as f64 * spacing) * 0.5;
+        let dimensions = cells.map(|n| n + 1);
+        let template = Grid::new(origin, spacing, dimensions, AtomType::Carbon)?;
+
+        let receptor = receptor
+            .atoms
+            .iter()
+            .filter(|a| !a.atom_type.is_hydrogen())
+            .cloned()
+            .collect();
+
+        Ok(Some(Self {
+            template,
+            cutoff,
+            receptor: Arc::new(receptor),
+            built: Mutex::new(Vec::new()),
+        }))
+    }
+
+    /// Number of atom classes gridded so far.
+    pub fn len(&self) -> usize {
+        self.built.lock().map(|b| b.len()).unwrap_or(0)
+    }
+
+    /// Whether no grid has been built yet.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The grids for `ligand`'s atom classes, building any not built yet.
+    pub fn grid_set(
+        &self,
+        ligand: &Molecule,
+        forcefield: &dyn ForceField,
+    ) -> Result<GridSet, GridError> {
+        let mut keys: Vec<ProbeKey> = Vec::new();
+        let mut probes: Vec<Atom> = Vec::new();
+        let atom_grid = ligand
+            .atoms
+            .iter()
+            .map(|atom| {
+                // Vina's grids skip closure dummies as well as hydrogens.
+                if atom.atom_type.is_hydrogen() || atom.atom_type.is_closure_dummy() {
+                    return None;
+                }
+                let key = ProbeKey::of(atom);
+                Some(keys.iter().position(|k| *k == key).unwrap_or_else(|| {
+                    keys.push(key);
+                    probes.push(atom.clone());
+                    keys.len() - 1
+                }))
+            })
+            .collect();
+
+        // Ligands starting together wait here for one sweep that fills
+        // every class still missing, rather than each filling its own.
+        let mut built = self
+            .built
+            .lock()
+            .map_err(|_| GridError::ParseError("grid cache lock poisoned".to_string()))?;
+        let missing: Vec<usize> = (0..keys.len())
+            .filter(|&i| !built.iter().any(|(k, _)| *k == keys[i]))
+            .collect();
+        if !missing.is_empty() {
+            let missing_probes: Vec<Atom> = missing.iter().map(|&i| probes[i].clone()).collect();
+            let grids = fill_grids(
+                &self.template,
+                &missing_probes,
+                &self.receptor,
+                forcefield,
+                self.cutoff,
+            )?;
+            for (&i, grid) in missing.iter().zip(grids) {
+                built.push((keys[i], Arc::new(grid)));
+            }
+        }
+        let grids = keys
+            .iter()
+            .map(|key| {
+                built
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, g)| Arc::clone(g))
+                    .expect("every class was just built")
+            })
+            .collect();
+
+        Ok(GridSet {
+            grids,
+            atom_grid,
+            receptor: Arc::clone(&self.receptor),
+        })
     }
 }
 
@@ -843,6 +935,43 @@ mod tests {
             }
         }
         assert!(worst < 1e-3, "worst relative grid error {worst}");
+    }
+
+    /// Grids are built once per class and shared, with the values a
+    /// ligand's own set would have.
+    #[test]
+    fn test_receptor_grids_are_shared() {
+        let ff = VinaForceField::default();
+        let shared = ReceptorGrids::new(
+            &receptor(),
+            &ff,
+            &Vector3::zeros(),
+            &Vector3::repeat(12.0),
+            0.0,
+            0.375,
+        )
+        .unwrap()
+        .expect("Vina is gridable");
+        assert!(shared.is_empty());
+
+        // Carbon only, then carbon and oxygen: the second adds one grid.
+        let mut carbon = ligand_at(&[Vector3::new(4.1, 0.7, 0.3)]);
+        carbon.atoms[0].atom_type = AtomType::Carbon;
+        let first = shared.grid_set(&carbon, &ff).unwrap();
+        assert_eq!(shared.len(), 1);
+        let both = ligand_at(&[Vector3::new(4.1, 0.7, 0.3), Vector3::new(1.37, 3.21, -2.11)]);
+        let second = shared.grid_set(&both, &ff).unwrap();
+        assert_eq!(shared.len(), 2);
+        assert!(Arc::ptr_eq(&first.grids[0], &second.grids[0]));
+
+        let own = build(&both, 0.375);
+        for (a, b) in second.grids.iter().zip(&own.grids) {
+            assert_eq!(a.data, b.data);
+        }
+        assert_eq!(
+            second.energy(&both, &ff).unwrap(),
+            own.energy(&both, &ff).unwrap()
+        );
     }
 
     #[test]
