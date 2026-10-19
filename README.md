@@ -2,61 +2,85 @@
 
 A Rust implementation of [AutoDock Vina](https://vina.scripps.edu/) for molecular docking.
 
-> **Status: work in progress — not yet validated for production use.**
-> The scoring function now agrees with AutoDock Vina to about 1 kcal/mol on our
-> one benchmark complex, but the conformational search is much weaker than
-> Vina's and finds the correct pose only part of the time. Please do not treat
-> results from this tool as a substitute for AutoDock Vina yet. See
-> [Status and limitations](#status-and-limitations) for measured numbers.
+rustdock-vina reimplements AutoDock Vina 1.2.7's scoring and search. On the
+CASF-2016 and PoseBusters benchmark sets it scores crystal poses the same as
+Vina, docks about as accurately, and is faster, as the tables below show. Its
+output files can be read and rescored by Vina.
 
 ## Features
 
-- Vina scoring function (gauss, repulsion, hydrophobic, H-bond terms) with
-  bond-graph-derived `xs` atom typing
-- Monte Carlo search with local minimization, parallelized across poses via
-  [rayon](https://github.com/rayon-rs/rayon)
-- RMSD-clustered binding modes
-- Configuration file support for the search box
-- Batch ligand docking with directory output
-- PDBQT file parsing and writing
-- Memory-safe implementation in Rust
+- Vina and Vinardo scoring, matching Vina 1.2.7: the same atom typing, bond
+  inference and torsional normalization
+- Vina's Monte Carlo search: independent chains, BFGS local optimization with
+  analytic gradients, and RMSD clustering of binding modes
+- Precomputed per-atom-type affinity grids
+- Batch screening: many ligands docked into one box in parallel, sharing one
+  set of receptor grids
+- PDBQT output in Vina's layout that keeps the input ligand's records, so
+  Meeko and Vina read it back
+- Reproducible runs with `--seed`
+- Experimental AutoDock4 scoring (`--scoring ad4`; not validated)
 
-## Status and limitations
+## Parity with AutoDock Vina
 
-Measured on 1IEP (imatinib bound to Abl kinase), the one complex in
-`benchmark_data/`, against real AutoDock Vina run on the same input files:
+Both programs docked the same prepared inputs: a Meeko ligand built from an
+RDKit conformer, so the crystal pose never reaches the search, and an
+Open Babel receptor. The search box is the crystal ligand's extent plus 10 Å.
+Both used exhaustiveness 8, 9 modes, seed 42 and 16 CPUs. A top-1 success is a
+top pose within 2 Å heavy-atom RMSD of the crystal ligand. The harness and the
+full per-complex reports are in [`benchmark/parity/`](benchmark/parity/).
 
-| | AutoDock Vina | rustdock-vina |
-|---|---|---|
-| Affinity of the crystal pose | −11.87 kcal/mol | **−10.93 kcal/mol** |
-| Redocking success (best pose within 2 Å) | ~always | **~40% of runs** |
-| Wall time (8 exhaustiveness, 24 cores) | ~1 s | ~14 s |
+**Vina scoring** ([CASF-2016](benchmark/parity/PARITY_full.md),
+[PoseBusters](benchmark/parity/PARITY_posebusters.md))
 
-What this means in practice:
+| | CASF-2016 (285): Vina | CASF-2016: rustdock | PoseBusters (428): Vina | PoseBusters: rustdock |
+|---|---|---|---|---|
+| Docked without error | 280 | 285 | 424 | 428 |
+| Top-1 success (< 2 Å) | 154 | 154 | 236 | 238 |
+| Any-mode success (< 2 Å) | 226 | 221 | 341 | 341 |
+| Median top-1 RMSD (Å) | 1.65 | 1.65 | 1.77 | 1.74 |
+| Top-1 PoseBusters-valid | 256 | 265 | 397 | 401 |
+| Median wall time (s) | 4.0 | 2.7 | 4.9 | 3.9 |
 
-- **Scoring is close but not exact.** Roughly 1 kcal/mol high on this complex.
-  A single complex is not a validation set.
-- **The search is the weak part.** Runs that fail converge on a secondary site
-  about 12 Å away at roughly −9 kcal/mol. Vina finds that site too and ranks it
-  below the true one; the difference is that Vina reliably also finds the true
-  one. Raising `--exhaustiveness` helps.
-- **Performance is far off.** Every energy evaluation is a full O(N_ligand ×
-  N_receptor) loop. There is no precomputed affinity grid, which is the single
-  biggest reason for the gap.
+**Vinardo scoring** ([CASF-2016](benchmark/parity/PARITY_full_vinardo.md),
+[PoseBusters](benchmark/parity/PARITY_posebusters_vinardo.md))
 
-Known gaps, all of which are unimplemented rather than partially working:
+| | CASF-2016 (285): Vina | CASF-2016: rustdock | PoseBusters (428): Vina | PoseBusters: rustdock |
+|---|---|---|---|---|
+| Docked without error | 280 | 285 | 424 | 428 |
+| Top-1 success (< 2 Å) | 144 | 153 | 210 | 222 |
+| Any-mode success (< 2 Å) | 198 | 215 | 305 | 314 |
+| Median top-1 RMSD (Å) | 1.92 | 1.76 | 2.02 | 1.90 |
+| Top-1 PoseBusters-valid | 257 | 262 | 398 | 399 |
+| Median wall time (s) | 4.0 | 3.0 | 5.1 | 4.0 |
 
-- **Vinardo scoring and flexible side chains are not implemented.** Earlier
-  versions of this README advertised both; `--flex` is accepted and ignored.
-- **The AD4 scoring function is experimental** and is not validated against
-  AutoDock4 — it warns when selected. Its parameter table is a stub.
-- **Output PDBQT is not round-trippable through AutoDock Vina**: no
-  `ROOT`/`BRANCH`/`TORSDOF` records are written, and atom-name columns are
-  offset by one, which also affects some structure viewers.
-- **PDBQT is the only supported format.** There is no receptor preparation
-  step, so inputs must come from MGLTools/ADFR/Meeko.
-- Only `center_x/y/z` and `size_x/y/z` are read from a config file; any other
-  key is reported and ignored.
+- **Scoring.** For all 704 crystal poses that Vina could read, rustdock's
+  score is within 0.03 kcal/mol of Vina's, with either scoring function. (The
+  Vina-scoring reports predate a fix to bond inference and show up to
+  0.38 kcal/mol; rescoring since the fix gives at most 0.023.)
+- **Search.** Top-1 success is about the same as Vina's. Each set was run
+  with a single seed, so differences of a few percent may be chance.
+- **Errors.** Vina rejects receptors containing As, Xe, Mo or B; rustdock
+  docks them.
+- **Output.** Vina reads rustdock's output files. It rescores the top pose
+  at a median 0.002–0.003 kcal/mol from the affinity rustdock reports, and
+  at most 0.011 with Vinardo. (The Vina-scoring reports, made before the
+  bond fix, show up to 0.27.)
+- **Screening.** Docking 100 CASF-2016 ligands into one pocket on 96 threads
+  took 141 s with `--batch`, against 1024 s with Vina 1.2.7's `--batch` and
+  210 s with 12 Vina processes of 8 threads. The best affinities correlate
+  with Vina's at Pearson 0.98.
+
+## Limitations
+
+- **Flexible side chains are not implemented.** `--flex` is accepted and
+  ignored.
+- **AD4 scoring is experimental.** It has not been validated against
+  AutoDock4 and warns when selected.
+- **PDBQT is the only input format.** There is no preparation step, so
+  prepare inputs with Meeko, ADFR or MGLTools.
+- **Config files** set only `center_x/y/z` and `size_x/y/z`; other keys are
+  reported and ignored.
 
 ## Installation
 
@@ -176,10 +200,10 @@ cargo run --bin vina -- score \
 src/
   atom/           Atom types, van der Waals radii, H-bond properties
   molecule/       Molecule struct: atoms, bonds, torsions, geometry
-  forcefield/     ForceField trait + Vina and AD4 implementations
+  forcefield/     ForceField trait + Vina, Vinardo and AD4 implementations
   scoring/        High-level scoring combining forcefield terms
-  optimization/   Optimizer trait + Monte Carlo search
-  grid/           Spatial grid for efficient energy lookup
+  optimization/   Optimizer trait + Vina's Monte Carlo search
+  grid/           Precomputed affinity grids
   io/             PDBQT parser and writer
   math/           Vector/matrix utilities
   utils/          General helpers
@@ -187,6 +211,7 @@ src/
   main.rs         CLI binary
 tests/            Integration tests and test data
 benches/          Criterion benchmarks
+benchmark/parity/ Parity harness and reports against AutoDock Vina
 ```
 
 ## Testing and Benchmarks
