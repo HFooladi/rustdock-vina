@@ -93,12 +93,32 @@ All `dock` options:
 | `-c, --config <FILE>` | Configuration file for docking parameters | |
 | `--center <X,Y,Z>` | Center of the search box | |
 | `--size <X,Y,Z>` | Size of the search box | |
-| `--scoring <NAME>` | Scoring function: `vina`, or experimental `ad4` | `vina` |
+| `--scoring <NAME>` | Scoring function: `vina`, `vinardo`, or experimental `ad4` | `vina` |
 | `--exhaustiveness <N>` | Search exhaustiveness (higher = more accurate, slower) | `8` |
 | `--num-modes <N>` | Number of binding modes to generate | `9` |
 | `-o, --out <FILE>` | Output file for docking results | |
-| `--dir <DIR>` | Output directory for batch mode results | |
+| `--batch <FILE/DIR>...` | Ligands to screen: PDBQT files, or directories of them | |
+| `--dir <DIR>` | Output directory (required with `--batch`) | |
+| `--cpu <N>` | Number of threads | all cores |
 | `--energy-range <KCAL>` | Energy range for output poses (kcal/mol) | `3.0` |
+| `--seed <N>` | Random seed; the same seed and inputs give the same poses | random |
+| `--grid-spacing <A>` | Spacing of the precomputed affinity grids | `0.375` |
+| `--no-grid` | Search on exact pairwise energies (slow) | |
+
+### Screening a library
+
+```bash
+vina dock --receptor protein.pdbqt --batch ligands/ --dir results/ \
+  --center 0,0,0 --size 20,20,20 --seed 42
+```
+
+`--batch` docks many ligands into one box. The receptor's grids are built
+once and shared, and ligands are docked in parallel, so all cores stay busy
+even though one dock runs only `exhaustiveness` chains. Each ligand's poses go
+to `results/<name>_out.pdbqt`, the same as docking it alone with the same
+seed. `results/scores.tsv` lists every ligand's best affinity, in input order.
+A ligand that fails to parse or dock is listed there with its error, and the
+run carries on.
 
 ### Scoring
 
@@ -115,7 +135,7 @@ All `score` options:
 | `--receptor <FILE>` | PDBQT file containing the receptor (required) | |
 | `--ligand <FILE>` | PDBQT file containing the ligand pose (required) | |
 | `--flex <FILE>` | Accepted but **not implemented** — currently ignored | |
-| `--scoring <NAME>` | Scoring function: `vina`, or experimental `ad4` | `vina` |
+| `--scoring <NAME>` | Scoring function: `vina`, `vinardo`, or experimental `ad4` | `vina` |
 
 ### Configuration file
 

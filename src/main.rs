@@ -4,13 +4,17 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use log::{error, info, warn};
 use nalgebra::Vector3;
+use rayon::prelude::*;
 use rustdock_vina::forcefield::{
     ad4::AD4ForceField, vina::VinaForceField, vinardo::VinardoForceField, ForceField,
 };
 use rustdock_vina::io::{parse_pdbqt, write_docking_results};
-use rustdock_vina::optimization::monte_carlo::{MonteCarlo, MonteCarloParams};
-use rustdock_vina::optimization::Optimizer;
-use std::path::PathBuf;
+use rustdock_vina::optimization::monte_carlo::{MonteCarlo, MonteCarloParams, Target};
+use rustdock_vina::optimization::DockingResult;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 /// Command-line arguments for the application
 #[derive(Parser, Debug)]
@@ -24,6 +28,8 @@ struct Cli {
     command: Commands,
 }
 
+// Parsed once per run, so the size of `Dock` does not matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Dock a ligand to a receptor
@@ -68,9 +74,20 @@ enum Commands {
         #[clap(long, short, value_parser)]
         out: Option<PathBuf>,
 
-        /// Output directory for the docking results (in batch mode)
+        /// Ligands to screen, as PDBQT files or directories of them. They are
+        /// docked in parallel against one set of receptor grids; each one's
+        /// poses go to `--dir`, and `--dir`/scores.tsv lists every best
+        /// affinity. A ligand that fails is reported there and skipped.
+        #[clap(long, value_parser, num_args = 1..)]
+        batch: Vec<PathBuf>,
+
+        /// Output directory for the docking results (required with --batch)
         #[clap(long, value_parser)]
         dir: Option<PathBuf>,
+
+        /// Number of threads (default: all cores)
+        #[clap(long)]
+        cpu: Option<usize>,
 
         /// Energy range for output poses (kcal/mol)
         #[clap(long, default_value_t = 3.0)]
@@ -132,7 +149,9 @@ fn main() -> Result<()> {
             exhaustiveness,
             num_modes,
             out,
+            batch,
             dir,
+            cpu,
             energy_range,
             grid_spacing,
             no_grid,
@@ -143,10 +162,21 @@ fn main() -> Result<()> {
 
             info!("Using {} scoring function", forcefield.name());
 
-            if ligand.is_empty() {
+            if let Some(threads) = cpu {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build_global()
+                    .context("failed to set the thread count")?;
+            }
+
+            let batch = expand_batch(&batch)?;
+            if ligand.is_empty() && batch.is_empty() {
                 return Err(anyhow::anyhow!(
-                    "no ligand given: pass at least one --ligand FILE"
+                    "no ligand given: pass at least one --ligand FILE or --batch FILE/DIR"
                 ));
+            }
+            if !batch.is_empty() && dir.is_none() {
+                return Err(anyhow::anyhow!("--batch needs an output --dir"));
             }
 
             // Parse configuration
@@ -222,14 +252,19 @@ fn main() -> Result<()> {
                 seed,
                 ..MonteCarloParams::default()
             });
+            // Every ligand shares one set of receptor grids.
+            let target =
+                optimizer.target(receptor_molecule, forcefield.as_ref(), center, box_size)?;
+            let job = DockJob {
+                optimizer: &optimizer,
+                target: &target,
+                forcefield: forcefield.as_ref(),
+                num_modes,
+                energy_range,
+            };
 
             // Process each ligand
             for ligand_path in ligand {
-                info!("Loading ligand: {}", ligand_path.display());
-                let ligand_molecule = parse_pdbqt(&ligand_path).with_context(|| {
-                    format!("Failed to parse ligand file: {}", ligand_path.display())
-                })?;
-
                 // Determine output path
                 let output_path = if let Some(out_path) = &out {
                     out_path.clone()
@@ -241,39 +276,12 @@ fn main() -> Result<()> {
                     PathBuf::from(format!("{}_out.pdbqt", ligand_stem))
                 };
 
-                // Run docking
                 info!(
                     "Docking ligand {} with exhaustiveness {}",
                     ligand_path.display(),
                     exhaustiveness
                 );
-                let results = optimizer.generate_poses(
-                    &ligand_molecule,
-                    &receptor_molecule,
-                    forcefield.as_ref(),
-                    center,
-                    box_size,
-                    num_modes,
-                    0, // Vina's step count for this ligand
-                )?;
-
-                // Apply the force field's torsional normalization (Vina:
-                // affinity = energy / (1 + weight_rot * num_tors))
-                let num_tors = ligand_molecule.vina_torsion_count();
-                let normalized_results: Vec<_> = results
-                    .into_iter()
-                    .map(|mut r| {
-                        r.energy = forcefield.apply_torsional_normalization(r.energy, num_tors);
-                        r
-                    })
-                    .collect();
-
-                let min_energy = normalized_results.first().map(|r| r.energy).unwrap_or(0.0);
-                let filtered_results: Vec<_> = normalized_results
-                    .into_iter()
-                    .filter(|r| r.energy <= min_energy + energy_range)
-                    .take(num_modes)
-                    .collect();
+                let filtered_results = job.dock(&ligand_path)?;
 
                 // Print the familiar Vina mode/affinity/RMSD table. Without
                 // this the command produced no terminal output at all and the
@@ -305,6 +313,10 @@ fn main() -> Result<()> {
                         output_path.display()
                     )
                 })?;
+            }
+
+            if let Some(dir) = dir.as_ref().filter(|_| !batch.is_empty()) {
+                run_batch(&job, &batch, dir)?;
             }
 
             info!("Docking completed successfully");
@@ -470,4 +482,151 @@ fn select_forcefield(name: &str) -> Result<Box<dyn ForceField>> {
             "unknown scoring function {other:?} (supported: vina, vinardo, ad4)"
         )),
     }
+}
+
+/// What every ligand of a `dock` run shares.
+struct DockJob<'a> {
+    optimizer: &'a MonteCarlo,
+    target: &'a Target,
+    forcefield: &'a dyn ForceField,
+    num_modes: usize,
+    energy_range: f64,
+}
+
+impl DockJob<'_> {
+    /// Dock the ligand in `path`: its modes within `energy_range` of the
+    /// best, at most `num_modes`, with affinities torsion-normalized.
+    fn dock(&self, path: &Path) -> Result<Vec<DockingResult>> {
+        info!("Loading ligand: {}", path.display());
+        let ligand = parse_pdbqt(path)
+            .with_context(|| format!("Failed to parse ligand file: {}", path.display()))?;
+        let results = self.optimizer.dock_into(
+            self.target,
+            &ligand,
+            self.forcefield,
+            self.num_modes,
+            0, // Vina's step count for this ligand
+        )?;
+
+        // Apply the force field's torsional normalization (Vina:
+        // affinity = energy / (1 + weight_rot * num_tors))
+        let num_tors = ligand.vina_torsion_count();
+        let normalized: Vec<_> = results
+            .into_iter()
+            .map(|mut r| {
+                r.energy = self
+                    .forcefield
+                    .apply_torsional_normalization(r.energy, num_tors);
+                r
+            })
+            .collect();
+
+        let min_energy = normalized.first().map(|r| r.energy).unwrap_or(0.0);
+        Ok(normalized
+            .into_iter()
+            .filter(|r| r.energy <= min_energy + self.energy_range)
+            .take(self.num_modes)
+            .collect())
+    }
+}
+
+/// The ligand files named by `--batch`: files as given, directories as
+/// their `.pdbqt` files in name order. Two ligands with the same file stem
+/// would write the same output, so that is an error.
+fn expand_batch(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut ligands = Vec::new();
+    for path in paths {
+        if path.is_dir() {
+            let mut found: Vec<PathBuf> = std::fs::read_dir(path)
+                .with_context(|| format!("Failed to read directory: {}", path.display()))?
+                .filter_map(|entry| entry.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.is_file()
+                        && p.extension()
+                            .is_some_and(|e| e.eq_ignore_ascii_case("pdbqt"))
+                })
+                .collect();
+            found.sort();
+            ligands.extend(found);
+        } else {
+            ligands.push(path.clone());
+        }
+    }
+    let mut stems = HashSet::new();
+    for ligand in &ligands {
+        let stem = ligand.file_stem().unwrap_or_default().to_os_string();
+        if !stems.insert(stem) {
+            return Err(anyhow::anyhow!(
+                "two --batch ligands share the name {:?}; their outputs would collide",
+                ligand.file_stem().unwrap_or_default()
+            ));
+        }
+    }
+    Ok(ligands)
+}
+
+/// Dock `ligands` in parallel into `job`'s target, writing each one's poses
+/// to `dir/<stem>_out.pdbqt` and every best affinity to `dir/scores.tsv`, in
+/// input order. A ligand that fails is logged and listed with its error.
+fn run_batch(job: &DockJob, ligands: &[PathBuf], dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("Failed to create output directory: {}", dir.display()))?;
+    let start = Instant::now();
+    let done = AtomicUsize::new(0);
+    let total = ligands.len();
+
+    let rows: Vec<String> = ligands
+        .par_iter()
+        .map(|path| {
+            let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+            let out = dir.join(format!("{stem}_out.pdbqt"));
+            let t0 = Instant::now();
+            let outcome = job.dock(path).and_then(|results| {
+                write_docking_results(&results, &out)
+                    .with_context(|| format!("Failed to write {}", out.display()))?;
+                Ok(results)
+            });
+            let seconds = t0.elapsed().as_secs_f64();
+            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+            match outcome {
+                Ok(results) => {
+                    let best = results.first().map(|r| r.energy);
+                    info!(
+                        "[{n}/{total}] {stem}: {} kcal/mol, {seconds:.1} s",
+                        best.map_or("no pose".to_string(), |e| format!("{e:.3}"))
+                    );
+                    format!(
+                        "{stem}\t{}\t{}\t{seconds:.2}\t{}\t",
+                        best.map_or(String::new(), |e| format!("{e:.3}")),
+                        results.len(),
+                        out.display()
+                    )
+                }
+                Err(e) => {
+                    warn!("[{n}/{total}] {stem}: failed: {e:#}");
+                    let reason = format!("{e:#}").replace(['\t', '\n'], " ");
+                    format!("{stem}\t\t0\t{seconds:.2}\t\t{reason}")
+                }
+            }
+        })
+        .collect();
+
+    let summary = dir.join("scores.tsv");
+    let mut text = String::from("ligand\taffinity\tmodes\tseconds\toutput\terror\n");
+    for row in &rows {
+        text.push_str(row);
+        text.push('\n');
+    }
+    std::fs::write(&summary, text)
+        .with_context(|| format!("Failed to write {}", summary.display()))?;
+
+    let failed = rows.iter().filter(|r| !r.ends_with('\t')).count();
+    let seconds = start.elapsed().as_secs_f64();
+    info!(
+        "Docked {} of {total} ligands in {seconds:.1} s ({:.1} ligands/min); scores in {}",
+        total - failed,
+        total as f64 * 60.0 / seconds.max(1e-9),
+        summary.display()
+    );
+    Ok(())
 }
