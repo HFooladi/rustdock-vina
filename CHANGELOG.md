@@ -50,6 +50,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one Gaussian, and its hydrophobic and H-bond ramps. On the CASF-2016 pilot
   it rescores crystal poses within 0.02 kcal/mol of Vina's Vinardo and docks
   19/29 top-1 (Vina: 18/29). The parity harness takes `--scoring vinardo`.
+  On the full sets, top-1 success is CASF-2016 153/285 (Vina: 144/285) and
+  PoseBusters 222/428 (Vina: 210/428), crystal poses rescore within 0.03
+  kcal/mol of Vina's, and Vina rescores rustdock's output within 0.011
+  (`PARITY_full_vinardo.md`, `PARITY_posebusters_vinardo.md`).
 - `benchmark/parity/`: a CASF-2016 docking parity harness against AutoDock
   Vina 1.2.7. Both programs dock identical Meeko/Open Babel-prepared inputs;
   the report gives top-1 success, symmetry-aware RMSD, PoseBusters validity,
