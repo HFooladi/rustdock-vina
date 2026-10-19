@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-19
+
 ### Changed
+- The command-line binary is now `rustdock` instead of `vina`, so it can be
+  installed next to AutoDock Vina. Release archives are named
+  `rustdock-<version>-<platform>`.
+- `--flex` is now an error instead of being parsed and ignored; flexible
+  receptor residues are not implemented.
 - The docking search is now a port of AutoDock Vina 1.2.7's
   (`optimization::vina_search`). On the 29-complex CASF-2016 pilot, top-1
   success rose from 11/29 to 15/29 (Vina: 16/29), any-mode success from
@@ -33,6 +40,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `local_steps`); the old per-move probabilities and step limits are gone.
   In `Optimizer::generate_poses`, `num_poses` is the number of modes and
   `max_steps` the Monte Carlo steps per chain (`0` for Vina's default).
+- Monte Carlo now minimizes each proposal before the Metropolis test, matching
+  Vina's basin-hopping; temperature raised to Vina's 1.2.
+- Logging defaults to `info`, and `dock` prints a Vina-style results table.
+- `--scoring ad4` warns that it is experimental and unvalidated.
+- The local optimizer rotates about the entry pose's centroid rather than the
+  current one, so rotation and torsion derivatives decouple.
+- Affinity grids are built ~5x faster (1IEP: 169 ms to 31 ms; a 1-run dock
+  0.5 s to 0.2 s). Pair energies come from radial tables per receptor/ligand
+  class, as in Vina's precalculation, and all ligand classes are filled in one
+  sweep that only visits receptor atoms within the cutoff. Grid values match
+  exact scoring to ~2e-4 relative.
 
 ### Added
 - Batch screening: `dock --batch <files or dirs> --dir <out>` docks many
@@ -155,19 +173,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unknown `--scoring` values, a missing `--ligand`, and malformed `--center`/
   `--size` are now errors instead of silent no-ops. Unrecognized config keys
   are reported.
-
-### Changed
-- Monte Carlo now minimizes each proposal before the Metropolis test, matching
-  Vina's basin-hopping; temperature raised to Vina's 1.2.
-- Logging defaults to `info`, and `dock` prints a Vina-style results table.
-- `--scoring ad4` warns that it is experimental and unvalidated.
-- The local optimizer rotates about the entry pose's centroid rather than the
-  current one, so rotation and torsion derivatives decouple.
-- Affinity grids are built ~5x faster (1IEP: 169 ms to 31 ms; a 1-run dock
-  0.5 s to 0.2 s). Pair energies come from radial tables per receptor/ligand
-  class, as in Vina's precalculation, and all ligand classes are filled in one
-  sweep that only visits receptor atoms within the cutoff. Grid values match
-  exact scoring to ~2e-4 relative.
 
 ### Removed
 - Placeholder `Molecule::calculate_internal_energy` (a bare inverse-distance

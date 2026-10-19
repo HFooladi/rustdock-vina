@@ -1,6 +1,6 @@
 [package]
 name = "rustdock-vina"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Hosein Fooladi <fooladi.hosein@gmail.com>"]
 description = "A Rust implementation of AutoDock Vina molecular docking algorithm"
@@ -11,6 +11,7 @@ categories = ["science", "simulation"]
 readme = "README.md"
 documentation = "https://docs.rs/rustdock-vina"
 homepage = "https://github.com/HFooladi/rustdock-vina"
+exclude = [".github/", "benchmark/", "benchmark_data/"]
 
 [dependencies]
 nalgebra = { version = "0.32", features = ["serde-serialize"] }  # Linear algebra
@@ -34,7 +35,7 @@ name = "rustdock_vina"
 path = "src/lib.rs"
 
 [[bin]]
-name = "vina"
+name = "rustdock"
 path = "src/main.rs"
 
 [[bench]]
