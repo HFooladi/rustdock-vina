@@ -45,7 +45,8 @@ pub fn parse_pdbqt<P: AsRef<Path>>(path: P) -> Result<Molecule, IoError> {
     // Rigid fragment of each atom: the ROOT is 0, each BRANCH opens a new one.
     let mut fragment_of: Vec<usize> = Vec::new();
     let mut fragment_stack: Vec<usize> = vec![0];
-    let mut fragment_count = 1;
+    // The atom each fragment hangs from (its BRANCH's first atom).
+    let mut fragment_parent: Vec<Option<usize>> = vec![None];
 
     // Track model number for multi-model files
     let mut model_number = 1;
@@ -120,8 +121,8 @@ pub fn parse_pdbqt<P: AsRef<Path>>(path: P) -> Result<Molecule, IoError> {
             // Start a new branch - store atom indices for later bond creation
             branch_stack.push((from_atom, to_atom));
             current_branch_atoms = Vec::new();
-            fragment_stack.push(fragment_count);
-            fragment_count += 1;
+            fragment_stack.push(fragment_parent.len());
+            fragment_parent.push(Some(from_atom));
         } else if line.starts_with("ENDBRANCH") {
             // Parse ENDBRANCH record
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -180,7 +181,7 @@ pub fn parse_pdbqt<P: AsRef<Path>>(path: P) -> Result<Molecule, IoError> {
     // Always infer connectivity. BRANCH records only describe the rotatable
     // bonds (6 for a typical drug-like ligand), which is nowhere near the full
     // bond graph that atom typing needs.
-    infer_bonds(&mut molecule, &fragment_of);
+    infer_bonds(&mut molecule, &fragment_of, &fragment_parent);
 
     // Hydrophobicity and donor status depend on connectivity, so they can only
     // be assigned once bonds exist.
@@ -278,55 +279,79 @@ fn parse_pdbqt_atom(line: &str, line_number: usize) -> Result<Atom, IoError> {
     Ok(atom)
 }
 
-/// Infer bonds based on distances between atoms.
+/// Infer bonds from distances, as Vina's `model::assign_bonds` does.
 ///
-/// As in Vina, only atoms of the same rigid fragment (`fragment_of`) can
-/// bond by distance; bonds between fragments are the BRANCH bonds. This
-/// keeps an opened macrocycle open: Meeko puts each closure dummy right on
-/// top of a carbon in another fragment.
-fn infer_bonds(molecule: &mut Molecule, fragment_of: &[usize]) {
-    // Heavy-atom covalent bonds run to about 1.9 A (S-S is the long case at
-    // ~2.05); bonds to hydrogen are near 1.1. Using one flat threshold for both
-    // would pull in 1-3 neighbours, which sit around 2.4 A.
-    const HEAVY_BOND_MAX: f64 = 2.1;
-    const HYDROGEN_BOND_MAX: f64 = 1.3;
+/// Two atoms can only bond if they cannot move relative to each other: they
+/// are in the same rigid fragment (`fragment_of`), or one is the atom the
+/// other's fragment hangs from (`fragment_parent`). This keeps an opened
+/// macrocycle open, since Meeko puts each closure dummy right on top of a
+/// carbon in another fragment. They bond if closer than 1.1 times the sum
+/// of their covalent radii, unless a third such atom is closer to both of
+/// them than they are to each other. The bonds between fragments are the
+/// BRANCH bonds, which are already present.
+fn infer_bonds(molecule: &mut Molecule, fragment_of: &[usize], fragment_parent: &[Option<usize>]) {
+    const ALLOWANCE: f64 = 1.1;
+    // The largest covalent radius; Vina looks this far for atoms in between.
+    const MAX_COVALENT: f64 = 1.75;
 
-    // Rotatable bonds come from the BRANCH records and are already present;
-    // record them so inference does not duplicate them.
+    let rigid = |a: usize, b: usize| match (fragment_of.get(a), fragment_of.get(b)) {
+        (Some(&fa), Some(&fb)) => {
+            fa == fb
+                || fragment_parent.get(fb) == Some(&Some(a))
+                || fragment_parent.get(fa) == Some(&Some(b))
+        }
+        _ => false,
+    };
+
     let mut existing: HashSet<(usize, usize)> = molecule
         .bonds
         .iter()
         .map(|b| ordered_pair(b.atom1_idx, b.atom2_idx))
         .collect();
 
-    for i in 0..molecule.atoms.len() {
-        for j in (i + 1)..molecule.atoms.len() {
-            if fragment_of.get(i) != fragment_of.get(j) {
+    // Bond candidates, and each atom's rigidly attached neighbours that could
+    // stand between it and a bonding partner.
+    let n = molecule.atoms.len();
+    let mut neighbours: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut candidates = Vec::new();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if !rigid(i, j) {
                 continue;
             }
-            let atom1 = &molecule.atoms[i];
-            let atom2 = &molecule.atoms[j];
-
-            let involves_hydrogen = atom1.atom_type.is_hydrogen() || atom2.atom_type.is_hydrogen();
-            let threshold = if involves_hydrogen {
-                HYDROGEN_BOND_MAX
-            } else {
-                HEAVY_BOND_MAX
-            };
-
-            if atom1.distance(atom2) >= threshold {
-                continue;
+            let (a, b) = (&molecule.atoms[i], &molecule.atoms[j]);
+            let r2 = (a.coordinates - b.coordinates).norm_squared();
+            let (ra, rb) = (a.atom_type.covalent_radius(), b.atom_type.covalent_radius());
+            let reach = |r: f64| (ALLOWANCE * (r + MAX_COVALENT)).powi(2);
+            if r2 < reach(ra) {
+                neighbours[i].push(j);
             }
-            if !existing.insert(ordered_pair(i, j)) {
-                continue;
+            if r2 < reach(rb) {
+                neighbours[j].push(i);
             }
-
-            // Inferred bonds describe connectivity only. Rotatability is a
-            // property of the torsion tree, which the BRANCH records define;
-            // guessing it from distance alone would mark nearly every bond
-            // rotatable.
-            let _ = molecule.add_bond(i, j, false);
+            if r2 < (ALLOWANCE * (ra + rb)).powi(2) {
+                candidates.push((i, j, r2));
+            }
         }
+    }
+
+    for (i, j, r2) in candidates {
+        let between = neighbours[i].iter().any(|&c| {
+            c != j
+                && rigid(j, c)
+                && (molecule.atoms[i].coordinates - molecule.atoms[c].coordinates).norm_squared()
+                    < r2
+                && (molecule.atoms[j].coordinates - molecule.atoms[c].coordinates).norm_squared()
+                    < r2
+        });
+        if between || !existing.insert(ordered_pair(i, j)) {
+            continue;
+        }
+        // Inferred bonds describe connectivity only. Rotatability is a
+        // property of the torsion tree, which the BRANCH records define;
+        // guessing it from distance alone would mark nearly every bond
+        // rotatable.
+        let _ = molecule.add_bond(i, j, false);
     }
 }
 
@@ -590,6 +615,38 @@ TORSDOF 3
         // Closed, every heavy pair is within three bonds of the closure, and
         // dummies pair with nothing else.
         assert!(ring.intramolecular_pairs().is_empty());
+    }
+
+    /// The N-methyl of 2wnc's ligand, whose amine hydrogen sits closer to both
+    /// the N and the methyl carbon than they are to each other. Vina's
+    /// `atom_exists_between` then leaves the N-C bond out, so the carbon is
+    /// hydrophobic.
+    #[test]
+    fn test_atom_between_blocks_bond() {
+        let text = "\
+ROOT
+ATOM      1  C   UNL     1     -70.593 -47.015 -74.539  1.00  0.00     0.187 C
+ATOM      2  N   UNL     1     -71.126 -45.907 -73.741  1.00  0.00    -0.332 N
+ATOM      3  C   UNL     1     -70.670 -44.553 -73.842  1.00  0.00     0.333 C
+ATOM      4  H   UNL     1     -71.725 -45.282 -74.420  1.00  0.00     0.348 HD
+ENDROOT
+TORSDOF 0
+";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("amine.pdbqt");
+        std::fs::write(&path, text).unwrap();
+        let amine = parse_pdbqt(&path).unwrap();
+
+        let mut bonds: Vec<_> = amine
+            .bonds
+            .iter()
+            .map(|b| ordered_pair(b.atom1_idx, b.atom2_idx))
+            .collect();
+        bonds.sort();
+        assert_eq!(bonds, [(0, 1), (1, 3)]);
+        assert!(!amine.atoms[0].is_hydrophobic);
+        assert!(amine.atoms[2].is_hydrophobic);
+        assert!(amine.atoms[1].is_hbond_donor);
     }
 
     #[test]

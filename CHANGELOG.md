@@ -66,6 +66,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pose is within 2 A of the crystal pose for 15/16 seeds.
 
 ### Fixed
+- Bonds are inferred as in Vina's `model::assign_bonds`: closer than 1.1
+  times the sum of the covalent radii (not a flat 2.1 A, or 1.3 A to
+  hydrogen), and not when a third atom is closer to both. In 2wnc the amine
+  hydrogen sits between the N and its methyl carbon, so Vina types that
+  carbon hydrophobic. Crystal-pose rescoring of the CASF-2016 and
+  PoseBusters sets went from max 0.38 to 0.023 kcal/mol off Vina's.
 - Macrocycles opened by Meeko now dock and score as in Vina 1.2.7. The
   closure types `CG0`-`CG3` and `G0`-`G3` are read (the atom type is read to
   the end of the line, not two columns); bonds are inferred only within a

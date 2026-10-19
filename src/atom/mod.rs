@@ -97,6 +97,40 @@ impl AtomType {
         }
     }
 
+    /// Covalent radius in Angstroms, which Vina's bond inference uses
+    /// (`covalent_radius` in `atom_kind_data`, atom_constants.h). Vina gives
+    /// its other metals `metal_covalent_radius`; types Vina does not know get
+    /// the same.
+    pub fn covalent_radius(&self) -> f64 {
+        match self {
+            AtomType::Carbon | AtomType::CarbonClosure(_) | AtomType::ClosureDummy(_) => 0.77,
+            AtomType::Nitrogen | AtomType::NitrogenH => 0.75,
+            AtomType::Oxygen | AtomType::OxygenH => 0.73,
+            AtomType::Phosphorus => 1.06,
+            AtomType::Sulfur | AtomType::SulfurH => 1.02,
+            AtomType::Hydrogen | AtomType::HydrogenD => 0.37,
+            AtomType::Fluorine => 0.71,
+            AtomType::Iodine => 1.33,
+            AtomType::Magnesium => 1.30,
+            AtomType::Manganese => 1.39,
+            AtomType::Zinc => 1.31,
+            AtomType::Calcium => 1.74,
+            AtomType::Iron => 1.25,
+            AtomType::Chlorine => 0.99,
+            AtomType::Bromine => 1.14,
+            AtomType::ZincPseudo => 0.0,
+            AtomType::Sodium
+            | AtomType::Potassium
+            | AtomType::Copper
+            | AtomType::Nickel
+            | AtomType::Cobalt
+            | AtomType::Cadmium
+            | AtomType::Mercury
+            | AtomType::Uranium
+            | AtomType::Unknown => 1.75,
+        }
+    }
+
     /// Parse atom type from string representation in PDBQT format
     pub fn from_pdbqt_string(s: &str) -> Self {
         // Vina matches type names case-sensitively, which is what tells
