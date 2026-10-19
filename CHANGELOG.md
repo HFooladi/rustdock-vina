@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Vina 1.2.7. Both programs dock identical Meeko/Open Babel-prepared inputs;
   the report gives top-1 success, symmetry-aware RMSD, PoseBusters validity,
   wall time and crystal-pose rescoring per complex. Tools install with uv.
+  It also runs the PoseBusters benchmark set (`--subset posebusters`). Top-1
+  success: CASF-2016 154/285 (Vina: 154/285), PoseBusters 238/428 (Vina:
+  236/428), at 0.7x and 0.8x Vina's median wall time
+  (`PARITY_full.md`, `PARITY_posebusters.md`).
 - `dock --seed` makes a docking run reproducible.
 - The docking search now scores ligand-receptor energy from precomputed
   per-atom-class affinity grids (`GridSet`), as Vina does, instead of summing
