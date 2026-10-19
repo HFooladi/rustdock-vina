@@ -10,8 +10,8 @@ cargo test                             # Run all tests (unit + integration)
 cargo build --release                  # Optimized build
 
 # Run the CLI
-cargo run --bin vina -- dock --receptor tests/test_data/receptor.pdbqt --ligand tests/test_data/ligand.pdbqt --center 0,0,0 --size 20,20,20
-cargo run --bin vina -- score --receptor tests/test_data/receptor.pdbqt --ligand tests/test_data/ligand.pdbqt
+cargo run --bin rustdock -- dock --receptor tests/test_data/receptor.pdbqt --ligand tests/test_data/ligand.pdbqt --center 0,0,0 --size 20,20,20
+cargo run --bin rustdock -- score --receptor tests/test_data/receptor.pdbqt --ligand tests/test_data/ligand.pdbqt
 
 # Other
 cargo bench                            # Performance benchmarks (benches/{docking,grid,optimization,scoring}.rs)
@@ -32,6 +32,8 @@ CI runs on every push/PR to `main`. It has three jobs:
 | **Security** | `cargo install cargo-audit` → `cargo audit` | Checks for known vulnerabilities in dependencies |
 | **Documentation** | `cargo doc --no-deps --document-private-items` | Ensures docs compile cleanly |
 
+Pushing a `v*` tag runs `.github/workflows/release.yml`: binaries for Linux, macOS and Windows on a GitHub release, and `cargo publish` if `CARGO_REGISTRY_TOKEN` is set.
+
 All three jobs should be passing. Run `gh run list --limit 1` to verify.
 
 **Before any commit, always run:** `cargo fmt && cargo clippy -- -D warnings && cargo test`
@@ -43,7 +45,7 @@ Rust implementation of the AutoDock Vina molecular docking algorithm.
 ```
 src/
 ├── lib.rs              # Library root — re-exports Atom, Molecule, VinaScore
-├── main.rs             # CLI binary ("vina") — subcommands: dock, score
+├── main.rs             # CLI binary ("rustdock") — subcommands: dock, score
 ├── atom/               # Atom types (AtomType enum), van der Waals radii, H-bond properties
 ├── molecule/           # Molecule struct: atoms, bonds, torsions, geometric operations
 ├── forcefield/         # ForceField trait + implementations:
@@ -59,7 +61,7 @@ src/
 ├── math/               # Vector/matrix utilities, coordinate transforms
 └── utils/              # General helpers
 tests/
-├── integration_tests.rs  # 8 integration tests covering parsing, scoring, optimization, output
+├── integration_tests.rs  # 16 integration tests covering parsing, scoring, optimization, output
 └── test_data/            # receptor.pdbqt, ligand.pdbqt
 benches/                  # Criterion benchmarks: docking, grid, optimization, scoring
 benchmark/parity/         # CASF-2016 parity vs AutoDock Vina (Python, uv venv); see its README
@@ -76,15 +78,15 @@ benchmark/parity/         # CASF-2016 parity vs AutoDock Vina (Python, uv venv);
 ### Execution Flow
 
 1. Parse PDBQT files → `Molecule` structs (`src/io/`)
-2. Select force field (Vina or AD4) (`src/forcefield/`)
-3. Monte Carlo optimization generates + optimizes poses (`src/optimization/`)
+2. Select force field (Vina, Vinardo or AD4) (`src/forcefield/`)
+3. Vina's Monte Carlo search on precomputed affinity grids generates + optimizes poses (`src/optimization/`, `src/grid/`)
 4. Score each pose with force field terms (`src/scoring/`)
 5. Write results to PDBQT (`src/io/`)
 
 ## Conventions
 
 - Rust edition 2021. Key dependencies: nalgebra (linear algebra), rayon (parallelism), clap (CLI).
-- Library crate name: `rustdock_vina` (underscore). Binary name: `vina`.
+- Library crate name: `rustdock_vina` (underscore). Binary name: `rustdock` (not `vina`, so it can sit next to AutoDock Vina).
 - Unit tests live inside modules (`#[cfg(test)]`). Integration tests in `tests/`.
 - All code changes must pass `cargo fmt`, `cargo clippy -- -D warnings`, and `cargo test` before merging.
 - The release profile uses LTO, single codegen unit, and `opt-level = 3`.

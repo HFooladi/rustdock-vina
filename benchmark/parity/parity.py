@@ -36,7 +36,7 @@ from rdkit.Chem import AllChem, rdMolAlign
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 VINA = HERE / "bin" / "vina"
-RUSTDOCK = REPO / "target" / "release" / "vina"
+RUSTDOCK = REPO / "target" / "release" / "rustdock"
 CORESET = HERE / "casf2016_coreset.tsv"
 
 EXHAUSTIVENESS = 8

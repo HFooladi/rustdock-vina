@@ -73,8 +73,8 @@ full per-complex reports are in [`benchmark/parity/`](benchmark/parity/).
 
 ## Limitations
 
-- **Flexible side chains are not implemented.** `--flex` is accepted and
-  ignored.
+- **Flexible side chains are not implemented.** `--flex` is rejected with
+  an error.
 - **AD4 scoring is experimental.** It has not been validated against
   AutoDock4 and warns when selected.
 - **PDBQT is the only input format.** There is no preparation step, so
@@ -97,14 +97,16 @@ cd rustdock-vina
 cargo build --release
 ```
 
-The compiled binary will be available at `target/release/vina`.
+The compiled binary will be available at `target/release/rustdock`. It is
+named `rustdock` rather than `vina` so that it can be installed next to
+AutoDock Vina.
 
 ## Usage
 
 ### Docking
 
 ```bash
-vina dock --receptor protein.pdbqt --ligand ligand.pdbqt --center 0,0,0 --size 20,20,20
+rustdock dock --receptor protein.pdbqt --ligand ligand.pdbqt --center 0,0,0 --size 20,20,20
 ```
 
 All `dock` options:
@@ -113,7 +115,7 @@ All `dock` options:
 |------|-------------|---------|
 | `--receptor <FILE>` | PDBQT file containing the receptor (required) | |
 | `--ligand <FILE>` | PDBQT file containing the ligand to dock | |
-| `--flex <FILE>` | Accepted but **not implemented** — currently ignored | |
+| `--flex <FILE>` | **Not implemented**; passing it is an error | |
 | `-c, --config <FILE>` | Configuration file for docking parameters | |
 | `--center <X,Y,Z>` | Center of the search box | |
 | `--size <X,Y,Z>` | Size of the search box | |
@@ -132,7 +134,7 @@ All `dock` options:
 ### Screening a library
 
 ```bash
-vina dock --receptor protein.pdbqt --batch ligands/ --dir results/ \
+rustdock dock --receptor protein.pdbqt --batch ligands/ --dir results/ \
   --center 0,0,0 --size 20,20,20 --seed 42
 ```
 
@@ -149,7 +151,7 @@ run carries on.
 Score an existing ligand pose against a receptor:
 
 ```bash
-vina score --receptor protein.pdbqt --ligand ligand.pdbqt
+rustdock score --receptor protein.pdbqt --ligand ligand.pdbqt
 ```
 
 All `score` options:
@@ -158,7 +160,7 @@ All `score` options:
 |------|-------------|---------|
 | `--receptor <FILE>` | PDBQT file containing the receptor (required) | |
 | `--ligand <FILE>` | PDBQT file containing the ligand pose (required) | |
-| `--flex <FILE>` | Accepted but **not implemented** — currently ignored | |
+| `--flex <FILE>` | **Not implemented**; passing it is an error | |
 | `--scoring <NAME>` | Scoring function: `vina`, `vinardo`, or experimental `ad4` | `vina` |
 
 ### Configuration file
@@ -178,18 +180,18 @@ size_z = 20.0
 ```
 
 ```bash
-vina dock --receptor protein.pdbqt --ligand ligand.pdbqt --config params.txt
+rustdock dock --receptor protein.pdbqt --ligand ligand.pdbqt --config params.txt
 ```
 
 ### Example with test data
 
 ```bash
-cargo run --bin vina -- dock \
+cargo run --bin rustdock -- dock \
   --receptor tests/test_data/receptor.pdbqt \
   --ligand tests/test_data/ligand.pdbqt \
   --center 0,0,0 --size 20,20,20
 
-cargo run --bin vina -- score \
+cargo run --bin rustdock -- score \
   --receptor tests/test_data/receptor.pdbqt \
   --ligand tests/test_data/ligand.pdbqt
 ```

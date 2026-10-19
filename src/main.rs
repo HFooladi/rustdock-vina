@@ -19,7 +19,7 @@ use std::time::Instant;
 /// Command-line arguments for the application
 #[derive(Parser, Debug)]
 #[clap(
-    name = "rustdock-vina",
+    name = "rustdock",
     version = rustdock_vina::VERSION,
     about = "A Rust implementation of AutoDock Vina for molecular docking"
 )]
@@ -42,7 +42,7 @@ enum Commands {
         #[clap(long, value_parser)]
         ligand: Vec<PathBuf>,
 
-        /// PDBQT file containing flexible residues in the receptor
+        /// Flexible receptor residues (not implemented; rejected)
         #[clap(long, value_parser)]
         flex: Option<PathBuf>,
 
@@ -116,7 +116,7 @@ enum Commands {
         #[clap(long, value_parser)]
         ligand: PathBuf,
 
-        /// PDBQT file containing flexible residues in the receptor
+        /// Flexible receptor residues (not implemented; rejected)
         #[clap(long, value_parser)]
         flex: Option<PathBuf>,
 
@@ -157,6 +157,8 @@ fn main() -> Result<()> {
             no_grid,
             seed,
         } => {
+            reject_flex(flex.as_deref())?;
+
             // Determine scoring function
             let forcefield = select_forcefield(&scoring)?;
 
@@ -228,16 +230,6 @@ fn main() -> Result<()> {
             let receptor_molecule = parse_pdbqt(&receptor).with_context(|| {
                 format!("Failed to parse receptor file: {}", receptor.display())
             })?;
-
-            // Parse flexible residues if provided
-            let _flex_molecule = if let Some(flex_path) = flex {
-                info!("Loading flexible residues: {}", flex_path.display());
-                Some(parse_pdbqt(&flex_path).with_context(|| {
-                    format!("Failed to parse flex file: {}", flex_path.display())
-                })?)
-            } else {
-                None
-            };
 
             // Create optimizer
             if !no_grid && !(grid_spacing.is_finite() && grid_spacing > 0.0) {
@@ -328,6 +320,8 @@ fn main() -> Result<()> {
             flex,
             scoring,
         } => {
+            reject_flex(flex.as_deref())?;
+
             // Determine scoring function
             let forcefield = select_forcefield(&scoring)?;
 
@@ -338,16 +332,6 @@ fn main() -> Result<()> {
             let receptor_molecule = parse_pdbqt(&receptor).with_context(|| {
                 format!("Failed to parse receptor file: {}", receptor.display())
             })?;
-
-            // Parse flexible residues if provided
-            let _flex_molecule = if let Some(flex_path) = flex {
-                info!("Loading flexible residues: {}", flex_path.display());
-                Some(parse_pdbqt(&flex_path).with_context(|| {
-                    format!("Failed to parse flex file: {}", flex_path.display())
-                })?)
-            } else {
-                None
-            };
 
             // Parse ligand
             info!("Loading ligand: {}", ligand.display());
@@ -459,6 +443,21 @@ fn parse_config(config_str: &str) -> Result<(Vector3<f64>, Vector3<f64>)> {
         _ => Err(anyhow::anyhow!(
             "Missing configuration values for center or box size"
         )),
+    }
+}
+
+/// Refuse `--flex`, which is not implemented.
+///
+/// Silently docking against a rigid receptor would hand the user results they
+/// believe include flexible side chains.
+fn reject_flex(flex: Option<&Path>) -> Result<()> {
+    match flex {
+        Some(path) => Err(anyhow::anyhow!(
+            "--flex is not implemented: flexible receptor residues are not \
+             supported yet (got {})",
+            path.display()
+        )),
+        None => Ok(()),
     }
 }
 
