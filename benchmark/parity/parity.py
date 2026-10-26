@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing as mp
+import os
 import re
 import subprocess
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,7 +44,7 @@ CORESET = HERE / "casf2016_coreset.tsv"
 
 EXHAUSTIVENESS = 8
 NUM_MODES = 9
-SEED = 42
+SEED = 42  # RDKit conformer seed, and the docking seed of the main reports
 BOX_PADDING = 10.0  # Angstroms added to the crystal ligand's extent per axis
 SUCCESS_RMSD = 2.0
 
@@ -163,11 +166,16 @@ def prepare(code: str, entry: Path, out: Path) -> dict:
 # --------------------------------------------------------------------------
 
 
-def dock(tool: str, out: Path, meta: dict, cpu: int, scoring: str) -> dict:
-    result_path = out / f"{tool}_dock.json"
+def tag(seed: int) -> str:
+    """File-name suffix for a docking seed; seed 42 keeps the original names."""
+    return "" if seed == SEED else f"_s{seed}"
+
+
+def dock(tool: str, out: Path, meta: dict, cpu: int, scoring: str, seed: int) -> dict:
+    result_path = out / f"{tool}{tag(seed)}_dock.json"
     if result_path.exists():
         return json.loads(result_path.read_text())
-    poses = out / f"{tool}_out.pdbqt"
+    poses = out / f"{tool}{tag(seed)}_out.pdbqt"
     c, s = meta["center"], meta["size"]
     rec, lig = str(out / "receptor.pdbqt"), str(out / "ligand_start.pdbqt")
     env = None
@@ -176,14 +184,14 @@ def dock(tool: str, out: Path, meta: dict, cpu: int, scoring: str) -> dict:
                "--center_x", str(c[0]), "--center_y", str(c[1]), "--center_z", str(c[2]),
                "--size_x", str(s[0]), "--size_y", str(s[1]), "--size_z", str(s[2]),
                "--exhaustiveness", str(EXHAUSTIVENESS), "--num_modes", str(NUM_MODES),
-               "--seed", str(SEED), "--cpu", str(cpu), "--scoring", scoring,
+               "--seed", str(seed), "--cpu", str(cpu), "--scoring", scoring,
                "--out", str(poses)]
     else:
         cmd = [str(RUSTDOCK), "dock", "--receptor", rec, "--ligand", lig,
                # `=` keeps a negative first coordinate from reading as a flag.
                "--center=" + ",".join(map(str, c)), "--size=" + ",".join(map(str, s)),
                "--exhaustiveness", str(EXHAUSTIVENESS), "--num-modes", str(NUM_MODES),
-               "--seed", str(SEED), "--scoring", scoring, "--out", str(poses)]
+               "--seed", str(seed), "--scoring", scoring, "--out", str(poses)]
         env = {"RAYON_NUM_THREADS": str(cpu), "RUST_LOG": "warn",
                "PATH": "/usr/bin:/bin"}
     t0 = time.perf_counter()
@@ -244,7 +252,7 @@ def model_coords(pdbqt: str) -> list[tuple[float | None, np.ndarray]]:
     return models
 
 
-def pose_mols(tool: str, out: Path) -> list[tuple[float | None, Chem.Mol]]:
+def pose_mols(tool: str, out: Path, seed: int) -> list[tuple[float | None, Chem.Mol]]:
     """Docked poses as RDKit molecules with bond orders, best first.
 
     Both programs' output is read the same way, with Meeko: it keeps the
@@ -253,7 +261,7 @@ def pose_mols(tool: str, out: Path) -> list[tuple[float | None, Chem.Mol]]:
     """
     from meeko import PDBQTMolecule, RDKitMolCreate
 
-    text = (out / f"{tool}_out.pdbqt").read_text()
+    text = (out / f"{tool}{tag(seed)}_out.pdbqt").read_text()
     models = model_coords(text)
     mol = RDKitMolCreate.from_pdbqt_mol(PDBQTMolecule(text, skip_typing=True))[0]
     poses = []
@@ -271,11 +279,11 @@ def rmsd(pose: Chem.Mol, xtal: Chem.Mol) -> float:
     return rdMolAlign.CalcRMS(Chem.RemoveHs(pose), Chem.RemoveHs(xtal))
 
 
-def posebusters_valid(pose: Chem.Mol, out: Path) -> tuple[bool | None, str]:
+def posebusters_valid(pose: Chem.Mol, out: Path, seed: int) -> tuple[bool | None, str]:
     """Whether the pose passes every PoseBusters docking check, and which fail."""
     from posebusters import PoseBusters
 
-    pred = out / "_pb_pose.sdf"
+    pred = out / f"_pb_pose{tag(seed)}.sdf"
     Chem.MolToMolFile(pose, str(pred))
     try:
         frame = PoseBusters(config="dock").bust(
@@ -289,19 +297,19 @@ def posebusters_valid(pose: Chem.Mol, out: Path) -> tuple[bool | None, str]:
     return not failed, ",".join(failed)
 
 
-def vina_scores_top_pose(out: Path, scoring: str) -> float | None:
+def vina_scores_top_pose(out: Path, scoring: str, seed: int) -> float | None:
     """Vina's affinity for rustdock's top pose, read from rustdock's output.
 
     Checks both that Vina can read the file and that rustdock reports the
     affinity Vina would.
     """
-    lines = (out / "rustdock_out.pdbqt").read_text().splitlines()
+    lines = (out / f"rustdock{tag(seed)}_out.pdbqt").read_text().splitlines()
     model = []
     for line in lines[1:]:
         if line.startswith("ENDMDL"):
             break
         model.append(line)
-    top = out / "_rustdock_top.pdbqt"
+    top = out / f"_rustdock_top{tag(seed)}.pdbqt"
     top.write_text("\n".join(model) + "\n")
     proc = subprocess.run([str(VINA), "--receptor", str(out / "receptor.pdbqt"),
                            "--ligand", str(top), "--score_only", "--autobox", "--cpu", "1",
@@ -311,19 +319,19 @@ def vina_scores_top_pose(out: Path, scoring: str) -> float | None:
     return float(m.group(1)) if m else None
 
 
-def evaluate(tool: str, out: Path, docked: dict, scoring: str) -> dict:
+def evaluate(tool: str, out: Path, docked: dict, scoring: str, seed: int) -> dict:
     row = {f"{tool}_seconds": docked["seconds"]}
     if not docked["ok"]:
         row[f"{tool}_error"] = docked.get("error", "")[:200]
         return row
     xtal = Chem.MolFromMolFile(str(out / "ligand_xtal.sdf"), removeHs=False)
     try:
-        poses = pose_mols(tool, out)
+        poses = pose_mols(tool, out, seed)
     except Exception as exc:  # noqa: BLE001
         row[f"{tool}_error"] = f"pose export: {exc}"[:200]
         return row
     rmsds = [rmsd(mol, xtal) for _, mol in poses]
-    valid, failed = posebusters_valid(poses[0][1], out)
+    valid, failed = posebusters_valid(poses[0][1], out, seed)
     row.update({
         f"{tool}_affinity": poses[0][0],
         f"{tool}_rmsd_top1": round(rmsds[0], 3),
@@ -333,7 +341,7 @@ def evaluate(tool: str, out: Path, docked: dict, scoring: str) -> dict:
         f"{tool}_pb_failed": failed,
     })
     if tool == "rustdock":
-        row["rustdock_top_vina_score"] = vina_scores_top_pose(out, scoring)
+        row["rustdock_top_vina_score"] = vina_scores_top_pose(out, scoring, seed)
     return row
 
 
@@ -342,32 +350,62 @@ def evaluate(tool: str, out: Path, docked: dict, scoring: str) -> dict:
 # --------------------------------------------------------------------------
 
 
+def run_complex(code: str, args: argparse.Namespace) -> dict[int, dict]:
+    """Prepare, dock with every seed and evaluate one complex: a row per seed."""
+    out = args.work / code
+    rows = {seed: {"code": code} for seed in args.seeds}
+    try:
+        meta = prepare(code, find_entry(args.pdbbind, code), out)
+        # The crystal-pose rescoring does not depend on the seed.
+        rescored = {}
+        for tool in ("vina", "rustdock"):
+            rescored.update(rescore(tool, out, args.scoring))
+        for seed, row in rows.items():
+            row.update(heavy_atoms=meta["heavy_atoms"],
+                       rotatable_bonds=meta["rotatable_bonds"])
+            for tool in ("vina", "rustdock"):
+                docked = dock(tool, out, meta, args.cpu, args.scoring, seed)
+                row.update(evaluate(tool, out, docked, args.scoring, seed))
+            row.update(rescored)
+    except Exception as exc:  # noqa: BLE001 - one bad entry must not stop the run
+        for row in rows.values():
+            row["prep_error"] = str(exc)[:200]
+    return rows
+
+
+def pin_worker(slots, cpu: int) -> None:
+    """Give a worker process its own `cpu` cores, inherited by the dockers."""
+    slot = slots.get()
+    os.sched_setaffinity(0, range(slot * cpu, (slot + 1) * cpu))
+
+
 def run(args: argparse.Namespace) -> None:
     if not VINA.exists():
         sys.exit(f"missing {VINA}; see benchmark/parity/README.md")
     subprocess.run(["cargo", "build", "--release", "--quiet"], cwd=REPO, check=True)
     codes = args.codes or select(args.subset, args.pdbbind)
-    rows = []
-    for n, code in enumerate(codes, 1):
-        out = args.work / code
-        row = {"code": code}
-        try:
-            meta = prepare(code, find_entry(args.pdbbind, code), out)
-            row.update(heavy_atoms=meta["heavy_atoms"], rotatable_bonds=meta["rotatable_bonds"])
-            for tool in ("vina", "rustdock"):
-                docked = dock(tool, out, meta, args.cpu, args.scoring)
-                row.update(evaluate(tool, out, docked, args.scoring))
-                row.update(rescore(tool, out, args.scoring))
-        except Exception as exc:  # noqa: BLE001 - one bad entry must not stop the run
-            row["prep_error"] = str(exc)[:200]
-        rows.append(row)
-        print(f"[{n}/{len(codes)}] {code}: "
-              f"vina {row.get('vina_rmsd_top1', '-')} A {row.get('vina_seconds', '-')} s | "
-              f"rustdock {row.get('rustdock_rmsd_top1', '-')} A {row.get('rustdock_seconds', '-')} s",
-              flush=True)
-    frame = pd.DataFrame(rows)
-    frame.to_csv(args.work / "results.csv", index=False)
-    write_report(frame, args)
+    slots = mp.Queue()
+    for slot in range(args.jobs):
+        slots.put(slot)
+    by_code = {}
+    with ProcessPoolExecutor(args.jobs, initializer=pin_worker,
+                             initargs=(slots, args.cpu)) as pool:
+        futures = {pool.submit(run_complex, code, args): code for code in codes}
+        for n, future in enumerate(as_completed(futures), 1):
+            code = futures[future]
+            by_code[code] = future.result()
+            row = by_code[code][args.seeds[0]]
+            print(f"[{n}/{len(codes)}] {code}: "
+                  f"vina {row.get('vina_rmsd_top1', '-')} A {row.get('vina_seconds', '-')} s | "
+                  f"rustdock {row.get('rustdock_rmsd_top1', '-')} A "
+                  f"{row.get('rustdock_seconds', '-')} s", flush=True)
+    for seed in args.seeds:
+        frame = pd.DataFrame([by_code[code][seed] for code in codes])
+        frame.to_csv(args.work / f"results{tag(seed)}.csv", index=False)
+        if seed == SEED:
+            write_report(frame, args)
+    if len(args.seeds) > 1:
+        write_seed_report(args)
 
 
 def summarize(frame: pd.DataFrame, tool: str) -> dict:
@@ -487,11 +525,124 @@ def report(args: argparse.Namespace) -> None:
     write_report(pd.read_csv(args.work / "results.csv"), args)
 
 
+# --------------------------------------------------------------------------
+# Several seeds
+# --------------------------------------------------------------------------
+
+TOOLS = (("vina", "AutoDock Vina"), ("rustdock", "rustdock-vina"))
+BOOTSTRAP = 10_000
+
+
+def per_seed(frame: pd.DataFrame, tool: str) -> dict:
+    """One seed's summary numbers for one tool, over every complex."""
+    top1, best = frame[f"{tool}_rmsd_top1"], frame[f"{tool}_rmsd_best"]
+    n = len(frame)
+    return {
+        "docked": top1.notna().mean() * 100,
+        "top1": (top1 < SUCCESS_RMSD).mean() * 100,
+        "best": (best < SUCCESS_RMSD).mean() * 100,
+        "median_rmsd": top1.median(),
+        "pb_valid": frame[f"{tool}_pb_valid"].fillna(False).astype(bool).sum() / n * 100,
+        "median_seconds": frame[f"{tool}_seconds"].median(),
+    }
+
+
+def write_seed_report(args: argparse.Namespace) -> None:
+    """Success rates over several docking seeds, and a paired comparison.
+
+    Each complex's top-1 success rate over the seeds is the unit of the paired
+    comparison, so a complex counts once however many seeds it has.
+    """
+    from scipy import stats
+
+    frames = {seed: pd.read_csv(args.work / f"results{tag(seed)}.csv").set_index("code")
+              for seed in args.seeds}
+    codes = frames[args.seeds[0]].index
+    n, k = len(codes), len(args.seeds)
+    seed_rows = {tool: pd.DataFrame({seed: per_seed(f, tool) for seed, f in frames.items()}).T
+                 for tool, _ in TOOLS}
+
+    # Per-complex success over seeds, on the complexes both tools docked with
+    # every seed.
+    success = {tool: pd.DataFrame({seed: f[f"{tool}_rmsd_top1"] for seed, f in frames.items()})
+               for tool, _ in TOOLS}
+    common = success["vina"].notna().all(axis=1) & success["rustdock"].notna().all(axis=1)
+    rate = {tool: (success[tool][common] < SUCCESS_RMSD).mean(axis=1) for tool, _ in TOOLS}
+    diff = (rate["rustdock"] - rate["vina"]).to_numpy()
+    rng = np.random.default_rng(0)
+    boots = diff[rng.integers(0, len(diff), (BOOTSTRAP, len(diff)))].mean(axis=1) * 100
+    lo, hi = np.percentile(boots, [2.5, 97.5])
+    wilcoxon = stats.wilcoxon(diff).pvalue if np.any(diff) else 1.0
+    unstable = {tool: ((rate[tool] > 0) & (rate[tool] < 1)).sum() for tool, _ in TOOLS}
+
+    affinity = pd.DataFrame({seed: f["rustdock_affinity"] - f["vina_affinity"]
+                             for seed, f in frames.items()})[common]
+
+    def mean_sd(tool: str, key: str, digits: int = 1, unit: str = "") -> str:
+        col = seed_rows[tool][key]
+        return f"{col.mean():.{digits}f}{unit} ± {col.std(ddof=1):.{digits}f}"
+
+    dataset = ("PoseBusters benchmark set" if args.subset == "posebusters"
+               else f"CASF-2016 core set, subset `{args.subset}`")
+    lines = [
+        f"# Docking parity over {k} seeds: rustdock-vina vs AutoDock Vina 1.2.7 "
+        f"({args.scoring} scoring)",
+        "",
+        f"{dataset} ({n} complexes), docked with seeds {', '.join(map(str, args.seeds))}; "
+        f"otherwise the protocol of the single-seed report. Rates are over all {n} "
+        "complexes, as mean ± standard deviation over the seeds.",
+        "",
+        "| | AutoDock Vina | rustdock-vina |",
+        "|---|---|---|",
+        f"| Docked without error (%) | {mean_sd('vina', 'docked')} | {mean_sd('rustdock', 'docked')} |",
+        f"| Top-1 success (< 2 A, %) | {mean_sd('vina', 'top1')} | {mean_sd('rustdock', 'top1')} |",
+        f"| Any-mode success (< 2 A, %) | {mean_sd('vina', 'best')} | {mean_sd('rustdock', 'best')} |",
+        f"| Median top-1 RMSD (A) | {mean_sd('vina', 'median_rmsd', 2)} | "
+        f"{mean_sd('rustdock', 'median_rmsd', 2)} |",
+        f"| Top-1 PoseBusters-valid (%) | {mean_sd('vina', 'pb_valid')} | "
+        f"{mean_sd('rustdock', 'pb_valid')} |",
+        f"| Median wall time (s) | {mean_sd('vina', 'median_seconds')} | "
+        f"{mean_sd('rustdock', 'median_seconds')} |",
+        f"| Complexes whose top-1 outcome changes with the seed | {unstable['vina']} | "
+        f"{unstable['rustdock']} |",
+        "",
+        f"## Paired comparison ({int(common.sum())} complexes both docked with every seed)",
+        "",
+        f"- Top-1 success, rustdock minus Vina: {diff.mean() * 100:+.1f} percentage points "
+        f"(95% bootstrap CI {lo:+.1f} to {hi:+.1f}; Wilcoxon signed-rank p = {wilcoxon:.2f} "
+        "on each complex's success rate over the seeds).",
+        f"- Top-1 affinity, rustdock minus Vina: median {np.nanmedian(affinity):+.3f} "
+        "kcal/mol over all complexes and seeds; rustdock's is lower (better) in "
+        f"{(affinity < -0.05).to_numpy().mean() * 100:.0f}% and higher in "
+        f"{(affinity > 0.05).to_numpy().mean() * 100:.0f}% of docks (by more than "
+        "0.05 kcal/mol).",
+        "",
+        "## Per seed",
+        "",
+        "Top-1 successes, and McNemar's exact test on the complexes only one tool "
+        "solved with that seed.",
+        "",
+        "| Seed | Vina | rustdock | Only Vina | Only rustdock | McNemar p |",
+        "|---|---|---|---|---|---|",
+    ]
+    for seed, f in frames.items():
+        v, r = f["vina_rmsd_top1"] < SUCCESS_RMSD, f["rustdock_rmsd_top1"] < SUCCESS_RMSD
+        only_v, only_r = int((v & ~r).sum()), int((r & ~v).sum())
+        p = stats.binomtest(only_r, only_v + only_r).pvalue if only_v + only_r else 1.0
+        lines.append(f"| {seed} | {int(v.sum())}/{n} | {int(r.sum())}/{n} | {only_v} | "
+                     f"{only_r} | {p:.2f} |")
+    suffix = "" if args.scoring == "vina" else f"_{args.scoring}"
+    path = (args.report.with_name(f"{args.report.stem}_seeds.md") if args.report
+            else HERE / f"PARITY_{args.subset}_seeds{suffix}.md")
+    path.write_text("\n".join(lines) + "\n")
+    print(f"wrote {path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name, func in (("run", run), ("report", report)):
+    for name, func in (("run", run), ("report", report), ("seeds", write_seed_report)):
         p = sub.add_parser(name)
         p.set_defaults(func=func)
         p.add_argument("--work", type=Path,
@@ -501,10 +652,15 @@ def main() -> None:
                        default="pilot")
         p.add_argument("--cpu", type=int, default=16)
         p.add_argument("--report", type=Path)
+        p.add_argument("--seeds", type=int, nargs="+", default=[SEED],
+                       help="docking seeds; the main report uses seed 42")
     sub.choices["run"].add_argument("--pdbbind", "--data", type=Path, required=True,
                                     help="dataset root: PDBbind (<group>/<code>/) or "
                                          "the PoseBusters benchmark set (<code>/)")
     sub.choices["run"].add_argument("--codes", nargs="*", help="override the subset")
+    sub.choices["run"].add_argument("--jobs", type=int, default=1,
+                                    help="complexes docked at once, each on its own "
+                                         "--cpu cores (pinned)")
     args = parser.parse_args()
     if args.work is None:
         name = "work" if args.subset != "posebusters" else "work-posebusters"
