@@ -11,7 +11,7 @@ categories = ["science", "simulation"]
 readme = "README.md"
 documentation = "https://docs.rs/rustdock-vina"
 homepage = "https://github.com/HFooladi/rustdock-vina"
-exclude = [".github/", "benchmark/", "benchmark_data/"]
+exclude = [".github/", "benchmark/", "benchmark_data/", "tests/parity.rs", "tests/parity_data/"]
 
 [dependencies]
 nalgebra = { version = "0.32", features = ["serde-serialize"] }  # Linear algebra

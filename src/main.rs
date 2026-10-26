@@ -11,6 +11,7 @@ use rustdock_vina::forcefield::{
 use rustdock_vina::io::{parse_pdbqt, write_docking_results};
 use rustdock_vina::optimization::monte_carlo::{MonteCarlo, MonteCarloParams, Target};
 use rustdock_vina::optimization::DockingResult;
+use rustdock_vina::scoring::score_pose;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -338,56 +339,28 @@ fn main() -> Result<()> {
             let ligand_molecule = parse_pdbqt(&ligand)
                 .with_context(|| format!("Failed to parse ligand file: {}", ligand.display()))?;
 
-            // Calculate interaction energy between ligand and receptor
-            let cutoff = 8.0;
-            let mut intermolecular_energy = 0.0;
-            let mut num_pairs = 0;
-            let mut positive_energy = 0.0;
-            let mut negative_energy = 0.0;
-
             println!("\nLigand atoms: {}", ligand_molecule.atoms.len());
             println!("Ligand bonds: {}", ligand_molecule.bonds.len());
             println!("Ligand torsions: {}", ligand_molecule.torsions.len());
             println!("Receptor atoms: {}", receptor_molecule.atoms.len());
 
-            for lig_atom in &ligand_molecule.atoms {
-                for rec_atom in &receptor_molecule.atoms {
-                    let distance = lig_atom.distance(rec_atom);
-                    if distance < cutoff && distance > 0.01 {
-                        if let Ok(pair_energy) =
-                            forcefield.atom_pair_energy(lig_atom, rec_atom, distance)
-                        {
-                            intermolecular_energy += pair_energy;
-                            num_pairs += 1;
-                            if pair_energy > 0.0 {
-                                positive_energy += pair_energy;
-                            } else {
-                                negative_energy += pair_energy;
-                            }
-                        }
-                    }
-                }
-            }
-
             // Vina formula: affinity = intermolecular / (1 + weight_rot * num_tors)
             // The internal energy cancels with unbound energy in the full formula
-            let num_tors = ligand_molecule.vina_torsion_count();
-            let affinity =
-                forcefield.apply_torsional_normalization(intermolecular_energy, num_tors);
-            let torsional_effect = intermolecular_energy - affinity;
+            let score = score_pose(&ligand_molecule, &receptor_molecule, forcefield.as_ref())?;
+            let torsional_effect = score.intermolecular - score.affinity;
 
             println!("\nScoring breakdown:");
-            println!("  Atom pairs within {}A: {}", cutoff, num_pairs);
-            println!("  Positive energy (repulsion): {:.3}", positive_energy);
-            println!("  Negative energy (attraction): {:.3}", negative_energy);
-            println!("  Intermolecular energy: {:.3}", intermolecular_energy);
+            println!("  Atom pairs within 8A: {}", score.pairs);
+            println!("  Positive energy (repulsion): {:.3}", score.positive);
+            println!("  Negative energy (attraction): {:.3}", score.negative);
+            println!("  Intermolecular energy: {:.3}", score.intermolecular);
             println!(
                 "  Torsional effect: {:.3} ({} torsions, weighted count {})",
                 torsional_effect,
                 ligand_molecule.torsions.len(),
-                num_tors
+                score.num_tors
             );
-            println!("\nAffinity: {:.3} (kcal/mol)", affinity);
+            println!("\nAffinity: {:.3} (kcal/mol)", score.affinity);
             info!("Scoring completed successfully");
         }
     }

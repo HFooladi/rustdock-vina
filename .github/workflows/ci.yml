@@ -32,6 +32,9 @@ jobs:
     
     - name: Run tests
       run: cargo test --verbose
+
+    - name: Run docking parity test
+      run: cargo test --release --test parity -- --ignored
     
     - name: Run benchmarks
       run: cargo bench --verbose
