@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `scoring::score_pose`, which scores a pose with any force field and returns
+  the breakdown `rustdock score` prints.
+- A parity regression suite (`tests/parity.rs`) that runs in CI. It checks
+  rustdock's crystal-pose scores (Vina and Vinardo) and its rescoring of
+  Vina's docked poses against AutoDock Vina 1.2.7 to within 0.02 kcal/mol, on
+  20 PoseBusters complexes. It also checks that docking 5 of them still finds
+  the crystal pose. `benchmark/parity/make_golden.py` regenerates the fixtures.
+
 ## [0.2.0] - 2026-10-19
 
 ### Changed

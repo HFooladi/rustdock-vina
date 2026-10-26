@@ -1,0 +1,26 @@
+REMARK VINA RESULT:    -4.521      0.000      0.000
+REMARK INTER + INTRA:          -4.961
+REMARK INTER:                  -4.918
+REMARK INTRA:                  -0.043
+REMARK UNBOUND:                -0.043
+REMARK SMILES N#Cc1cncnc1N
+REMARK SMILES IDX 3 1 4 2 5 3 6 4 7 5 8 6 2 7 1 8 9 9
+REMARK H PARENT 9 10 9 11
+ROOT
+ATOM      1  C   UNL     1      34.715  13.678  55.025  1.00  0.00     0.112 A 
+ATOM      2  C   UNL     1      34.849  14.889  55.671  1.00  0.00     0.136 A 
+ATOM      3  N   UNL     1      34.509  16.071  55.122  1.00  0.00    -0.243 NA
+ATOM      4  C   UNL     1      34.019  16.005  53.876  1.00  0.00     0.224 A 
+ATOM      5  N   UNL     1      33.849  14.884  53.160  1.00  0.00    -0.218 NA
+ATOM      6  C   UNL     1      34.198  13.723  53.738  1.00  0.00     0.144 A 
+ENDROOT
+BRANCH   1   7
+ATOM      7  C   UNL     1      35.095  12.467  55.667  1.00  0.00     0.105 C 
+ATOM      8  N   UNL     1      35.397  11.480  56.197  1.00  0.00    -0.192 NA
+ENDBRANCH   1   7
+BRANCH   6   9
+ATOM      9  N   UNL     1      34.006  12.574  52.960  1.00  0.00    -0.382 N 
+ATOM     10  H   UNL     1      34.341  12.712  52.010  1.00  0.00     0.158 HD
+ATOM     11  H   UNL     1      33.023  12.323  52.911  1.00  0.00     0.158 HD
+ENDBRANCH   6   9
+TORSDOF 2

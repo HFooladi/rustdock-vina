@@ -61,3 +61,30 @@ Steps cache under `work/<code>/`, so a rerun resumes where it stopped.
 
 Both programs' output PDBQT is read the same way, with Meeko, which rebuilds
 each pose's molecule from the `REMARK SMILES` lines the file carries.
+
+## Regression suite
+
+`tests/parity.rs` checks parity on every CI run. It does not need Vina or Python. Its fixtures in
+`tests/parity_data/` are 20 complexes from the PoseBusters set. The PoseBusters set comes from the
+PDB, so it can be redistributed; PDBbind cannot. The complexes are chosen to cover ligand size,
+torsion count, halogens, phosphorus, sulfur, metal sites and Meeko macrocycles. Each receptor is
+trimmed to whole residues near what is scored. `golden.tsv` holds Vina 1.2.7's scores for the
+trimmed files.
+
+| Test | Checks |
+|---|---|
+| `crystal_scores_match_vina`, `crystal_scores_match_vinardo` | Crystal-pose intermolecular energy and affinity within 0.02 kcal/mol of Vina's |
+| `vina_poses_rescore` | Vina's top docked pose, read from its output, within 0.02 of Vina's own score |
+| `docking_finds_crystal_pose` (`--ignored`, release) | Docking 5 small complexes (seed 42): top-1 heavy-atom RMSD < 2 Å and affinity no more than 0.3 above Vina's |
+
+Today rustdock is within 0.016 kcal/mol on every fixture. A 1.7% change to the H-bond weight, or a
+7.5 Å cutoff, makes the Vina-scoring tests fail. Docking takes about 8 s on 4 threads.
+
+To regenerate the fixtures after a PoseBusters run (`parity.py run --subset posebusters`):
+
+```bash
+benchmark/parity/.venv/bin/python benchmark/parity/make_golden.py
+```
+
+The script checks that trimming leaves Vina's scores unchanged. It also checks that each docked
+complex's in-order RMSD equals the symmetry-aware RMSD, which is what the Rust test relies on.
