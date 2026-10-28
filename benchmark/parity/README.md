@@ -47,6 +47,32 @@ Steps cache under `work/<code>/`, so a rerun resumes where it stopped.
 `--scoring vinardo` compares both programs' Vinardo instead (work directory
 `work-vinardo/`, report `PARITY_<subset>_vinardo.md`).
 
+### Several seeds
+
+One seed cannot tell a real difference of a few complexes from chance. To
+dock every complex with several seeds, use `--seeds`. To dock several
+complexes at once, use `--jobs`; each job is pinned to its own `--cpu` cores.
+
+```bash
+benchmark/parity/.venv/bin/python benchmark/parity/parity.py run \
+    --pdbbind /path/to/PDBbind --subset full --seeds 42 1 2 3 4 --jobs 4 --cpu 16
+```
+
+Seed 42 keeps the file names above. Other seeds add `_s<seed>` to the docking
+outputs and to `results_s<seed>.csv`. The run also writes
+`PARITY_<subset>_seeds[_vinardo].md`, which `parity.py seeds --seeds ...`
+rebuilds from the CSVs. That report gives:
+
+- each rate as mean ± standard deviation over the seeds;
+- a paired comparison over complexes: each complex's top-1 success rate across
+  the seeds, with a bootstrap 95% CI of the difference and a Wilcoxon
+  signed-rank test;
+- McNemar's exact test for each seed.
+
+With `--jobs`, choose the slots so that no two jobs share a physical core;
+otherwise wall times are inflated. On a 64-core machine with 2-way SMT, use
+`--jobs 4 --cpu 16`.
+
 ## Protocol
 
 | Step | How |

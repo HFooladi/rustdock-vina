@@ -26,46 +26,55 @@ output files can be read and rescored by Vina.
 Both programs docked the same prepared inputs: a Meeko ligand built from an
 RDKit conformer, so the crystal pose never reaches the search, and an
 Open Babel receptor. The search box is the crystal ligand's extent plus 10 Å.
-Both used exhaustiveness 8, 9 modes, seed 42 and 16 CPUs. A top-1 success is a
-top pose within 2 Å heavy-atom RMSD of the crystal ligand. The harness and the
-full per-complex reports are in [`benchmark/parity/`](benchmark/parity/).
+Both used exhaustiveness 8, 9 modes and 16 CPUs, and every complex was docked
+with five seeds (42, 1, 2, 3, 4). A top-1 success is a top pose within 2 Å
+heavy-atom RMSD of the crystal ligand. Rates are mean ± standard deviation
+over the seeds; a failed dock counts as a miss. The harness and the full
+per-complex reports are in [`benchmark/parity/`](benchmark/parity/).
 
-**Vina scoring** ([CASF-2016](benchmark/parity/PARITY_full.md),
-[PoseBusters](benchmark/parity/PARITY_posebusters.md))
-
-| | CASF-2016 (285): Vina | CASF-2016: rustdock | PoseBusters (428): Vina | PoseBusters: rustdock |
-|---|---|---|---|---|
-| Docked without error | 280 | 285 | 424 | 428 |
-| Top-1 success (< 2 Å) | 154 | 154 | 236 | 238 |
-| Any-mode success (< 2 Å) | 226 | 221 | 341 | 341 |
-| Median top-1 RMSD (Å) | 1.65 | 1.65 | 1.77 | 1.74 |
-| Top-1 PoseBusters-valid | 256 | 265 | 397 | 401 |
-| Median wall time (s) | 4.0 | 2.7 | 4.9 | 3.9 |
-
-**Vinardo scoring** ([CASF-2016](benchmark/parity/PARITY_full_vinardo.md),
-[PoseBusters](benchmark/parity/PARITY_posebusters_vinardo.md))
+**Vina scoring** ([CASF-2016](benchmark/parity/PARITY_full_seeds.md),
+[PoseBusters](benchmark/parity/PARITY_posebusters_seeds.md))
 
 | | CASF-2016 (285): Vina | CASF-2016: rustdock | PoseBusters (428): Vina | PoseBusters: rustdock |
 |---|---|---|---|---|
 | Docked without error | 280 | 285 | 424 | 428 |
-| Top-1 success (< 2 Å) | 144 | 153 | 210 | 222 |
-| Any-mode success (< 2 Å) | 198 | 215 | 305 | 314 |
-| Median top-1 RMSD (Å) | 1.92 | 1.76 | 2.02 | 1.90 |
-| Top-1 PoseBusters-valid | 257 | 262 | 398 | 399 |
-| Median wall time (s) | 4.0 | 3.0 | 5.1 | 4.0 |
+| Top-1 success (< 2 Å, %) | 53.3 ± 0.7 | 54.3 ± 0.2 | 54.7 ± 0.8 | 55.2 ± 0.3 |
+| Any-mode success (< 2 Å, %) | 78.2 ± 0.7 | 79.2 ± 1.7 | 77.6 ± 1.4 | 79.0 ± 0.8 |
+| Median top-1 RMSD (Å) | 1.65 | 1.61 | 1.77 | 1.77 |
+| Top-1 PoseBusters-valid (%) | 90.7 | 92.8 | 93.4 | 93.7 |
+| Median wall time (s) | 4.0 | 3.0 | 5.3 | 4.5 |
+| Paired top-1 difference, rustdock − Vina (95% CI) | | −0.1 pp (−1.4 to +1.2) | | −0.2 pp (−1.6 to +1.1) |
+
+**Vinardo scoring** ([CASF-2016](benchmark/parity/PARITY_full_vinardo_seeds.md),
+[PoseBusters](benchmark/parity/PARITY_posebusters_vinardo_seeds.md))
+
+| | CASF-2016 (285): Vina | CASF-2016: rustdock | PoseBusters (428): Vina | PoseBusters: rustdock |
+|---|---|---|---|---|
+| Docked without error | 280 | 285 | 424 | 428 |
+| Top-1 success (< 2 Å, %) | 51.5 ± 1.1 | 54.0 ± 0.8 | 49.3 ± 0.6 | 51.6 ± 0.4 |
+| Any-mode success (< 2 Å, %) | 72.2 ± 2.8 | 75.3 ± 1.3 | 71.2 ± 0.9 | 74.3 ± 0.8 |
+| Median top-1 RMSD (Å) | 1.84 | 1.76 | 2.01 | 1.91 |
+| Top-1 PoseBusters-valid (%) | 90.8 | 92.4 | 92.8 | 93.6 |
+| Median wall time (s) | 4.3 | 3.3 | 5.7 | 4.6 |
+| Paired top-1 difference, rustdock − Vina (95% CI) | | +2.2 pp (+0.6 to +3.9) | | +1.8 pp (+0.5 to +3.1) |
+
+The paired difference compares each complex's top-1 success rate over the
+five seeds, on the complexes both programs docked; the CI is a bootstrap over
+complexes. Single-seed reports (seed 42) with every complex are also in
+`benchmark/parity/` (`PARITY_full.md` and so on).
 
 - **Scoring.** For all 704 crystal poses that Vina could read, rustdock's
-  score is within 0.03 kcal/mol of Vina's, with either scoring function. (The
-  Vina-scoring reports predate a fix to bond inference and show up to
-  0.38 kcal/mol; rescoring since the fix gives at most 0.023.)
-- **Search.** Top-1 success is about the same as Vina's. Each set was run
-  with a single seed, so differences of a few percent may be chance.
+  score is within 0.03 kcal/mol of Vina's, with either scoring function.
+- **Search.** With Vina scoring, top-1 success is the same as Vina's to
+  within about 1.5 percentage points either way. With Vinardo, rustdock finds
+  the crystal pose about 2 points more often than Vina, a small difference
+  that is unlikely to be chance (Wilcoxon p ≤ 0.02 on both sets). Its cause
+  is not yet known.
 - **Errors.** Vina rejects receptors containing As, Xe, Mo or B; rustdock
   docks them.
 - **Output.** Vina reads rustdock's output files. It rescores the top pose
   at a median 0.002–0.003 kcal/mol from the affinity rustdock reports, and
-  at most 0.011 with Vinardo. (The Vina-scoring reports, made before the
-  bond fix, show up to 0.27.)
+  at most 0.020.
 - **Screening.** Docking 100 CASF-2016 ligands into one pocket on 96 threads
   took 141 s with `--batch`, against 1024 s with Vina 1.2.7's `--batch` and
   210 s with 12 Vina processes of 8 threads. The best affinities correlate

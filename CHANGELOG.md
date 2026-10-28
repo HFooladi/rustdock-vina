@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Vina's docked poses against AutoDock Vina 1.2.7 to within 0.02 kcal/mol, on
   20 PoseBusters complexes. It also checks that docking 5 of them still finds
   the crystal pose. `benchmark/parity/make_golden.py` regenerates the fixtures.
+- The parity harness docks with several seeds (`--seeds`) and several
+  complexes at once on pinned cores (`--jobs`), and reports success rates
+  over seeds with a paired comparison. The README's parity tables now come
+  from five seeds; the Vina-scoring reports are rerun since the bond-inference
+  fix.
 
 ## [0.2.0] - 2026-10-19
 
