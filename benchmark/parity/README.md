@@ -100,7 +100,9 @@ trimmed files.
 Ten of the complexes also have flexible side chains: up to three residues whose side chains are
 within 4 Å of the crystal ligand, prepared from the protein with Meeko's `mk_prepare_receptor.py
 --flexres` as `flex_rigid.pdbqt` and `flex.pdbqt`. Meeko fails on proteins with some metals (it
-has no covalent radius for Co, for example), so complexes it cannot prepare are skipped. Their
+has no covalent radius for Co, for example), so complexes it cannot prepare are skipped. Which
+complexes succeed can change between runs (6TW5_9M2 failed once and passed once), so a
+regeneration may pick a different flex set. Their
 `*_flex_*` columns hold Vina's `--score_only --flex` terms. Vina's own affinity there subtracts an
 unbound energy whose flex–receptor term comes from the grid while its internal energy uses exact
 pairs, so the script runs Vina a second time with `--unbound_energy` set to the internal energy;
@@ -111,9 +113,10 @@ that affinity is the normalized intermolecular energy, as rustdock reports it.
 | `crystal_scores_match_vina`, `crystal_scores_match_vinardo` | Crystal-pose intermolecular energy and affinity within 0.02 kcal/mol of Vina's |
 | `crystal_flex_scores_match_vina`, `crystal_flex_scores_match_vinardo` | With flexible side chains: intermolecular energy, affinity, ligand–flex, flex–receptor and flex–flex energies within 0.02 kcal/mol of Vina's |
 | `vina_poses_rescore` | Vina's top docked pose, read from its output, within 0.02 of Vina's own score |
+| `flex_docking_matches_vina` (`--ignored`, release) | Docking with flexible side chains (seed 42) the complexes also docked rigidly: top affinity no more than 0.3 above Vina's, and top-1 RMSD < 2 Å where Vina's is below 1.5 Å (5SAK_ZRY) |
 | `docking_finds_crystal_pose` (`--ignored`, release) | Docking 5 small complexes (seed 42): top-1 heavy-atom RMSD < 2 Å and affinity no more than 0.3 above Vina's |
 
-Today rustdock is within 0.016 kcal/mol on every rigid fixture and within 0.011 on every flex
+Today rustdock is within 0.016 kcal/mol on every rigid fixture and within 0.012 on every flex
 term. A 1.7% change to the H-bond weight, or a
 7.5 Å cutoff, makes the Vina-scoring tests fail. Docking takes about 8 s on 4 threads.
 

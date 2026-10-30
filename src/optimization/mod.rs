@@ -40,6 +40,10 @@ pub struct DockingResult {
     /// Docked ligand conformation
     pub molecule: Molecule,
 
+    /// The flexible side chains in this pose (the flex residues' molecule,
+    /// with its PDBQT records), when docking moved any
+    pub flex: Option<Molecule>,
+
     /// Components of the energy (vdW, electrostatic, etc.)
     pub energy_components: Vec<(String, f64)>,
 
