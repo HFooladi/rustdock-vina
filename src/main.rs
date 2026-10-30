@@ -12,6 +12,7 @@ use rustdock_vina::io::{parse_flex_pdbqt, parse_pdbqt, write_docking_results};
 use rustdock_vina::optimization::monte_carlo::{MonteCarlo, MonteCarloParams, Target};
 use rustdock_vina::optimization::DockingResult;
 use rustdock_vina::scoring::score_pose_with_flex;
+use rustdock_vina::FlexResidues;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -43,8 +44,9 @@ enum Commands {
         #[clap(long, value_parser)]
         ligand: Vec<PathBuf>,
 
-        /// Flexible receptor residues (not implemented for docking yet;
-        /// rejected; `score` accepts them)
+        /// Flexible side chains (PDBQT of BEGIN_RES/END_RES blocks, as for
+        /// Vina's --flex); --receptor is then the rigid part. Their torsions
+        /// are searched with the ligand's and written after it in each mode
         #[clap(long, value_parser)]
         flex: Option<PathBuf>,
 
@@ -160,8 +162,6 @@ fn main() -> Result<()> {
             no_grid,
             seed,
         } => {
-            reject_flex(flex.as_deref())?;
-
             // Determine scoring function
             let forcefield = select_forcefield(&scoring)?;
 
@@ -248,8 +248,26 @@ fn main() -> Result<()> {
                 ..MonteCarloParams::default()
             });
             // Every ligand shares one set of receptor grids.
-            let target =
-                optimizer.target(receptor_molecule, forcefield.as_ref(), center, box_size)?;
+            let target = match &flex {
+                Some(path) => {
+                    info!("Loading flexible residues: {}", path.display());
+                    let flex_residues =
+                        parse_flex_pdbqt(path, &receptor_molecule).with_context(|| {
+                            format!("Failed to parse flex residue file: {}", path.display())
+                        })?;
+                    warn_flex_outside_box(&flex_residues, &center, &box_size);
+                    optimizer.target_with_flex(
+                        receptor_molecule,
+                        flex_residues,
+                        forcefield.as_ref(),
+                        center,
+                        box_size,
+                    )?
+                }
+                None => {
+                    optimizer.target(receptor_molecule, forcefield.as_ref(), center, box_size)?
+                }
+            };
             let job = DockJob {
                 optimizer: &optimizer,
                 target: &target,
@@ -456,18 +474,26 @@ fn parse_config(config_str: &str) -> Result<(Vector3<f64>, Vector3<f64>)> {
     }
 }
 
-/// Refuse `--flex` for docking, which does not move side chains yet.
+/// Warn about flexible side-chain atoms outside the search box.
 ///
-/// Silently docking against a rigid receptor would hand the user results they
-/// believe include flexible side chains.
-fn reject_flex(flex: Option<&Path>) -> Result<()> {
-    match flex {
-        Some(path) => Err(anyhow::anyhow!(
-            "docking with --flex is not implemented yet: flexible side chains \
-             can only be scored, with `rustdock score --flex` (got {})",
-            path.display()
-        )),
-        None => Ok(()),
+/// As in Vina, every moving atom is charged a steep penalty per Angstrom
+/// outside the box, so a side chain that starts or must stay outside it
+/// distorts the search.
+fn warn_flex_outside_box(flex: &FlexResidues, center: &Vector3<f64>, size: &Vector3<f64>) {
+    let half = size * 0.5;
+    let outside = flex
+        .movable_atoms()
+        .filter(|a| !a.atom_type.is_hydrogen())
+        .filter(|a| {
+            let d = a.coordinates - center;
+            (0..3).any(|k| d[k].abs() > half[k])
+        })
+        .count();
+    if outside > 0 {
+        warn!(
+            "{outside} moving side-chain atoms lie outside the search box; \
+             enlarge the box to cover the flexible residues"
+        );
     }
 }
 
