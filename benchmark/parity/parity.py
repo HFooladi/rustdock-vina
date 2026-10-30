@@ -15,6 +15,9 @@ Usage (from the repository root):
 
 Every step caches its outputs under --work, so an interrupted run resumes and
 `report` can be rerun without docking again.
+
+With --flex, both dock with flexible side chains: up to three residues whose
+side chains touch the crystal ligand, prepared with Meeko.
 """
 
 from __future__ import annotations
@@ -47,6 +50,16 @@ NUM_MODES = 9
 SEED = 42  # RDKit conformer seed, and the docking seed of the main reports
 BOX_PADDING = 10.0  # Angstroms added to the crystal ligand's extent per axis
 SUCCESS_RMSD = 2.0
+
+MK_PREPARE_RECEPTOR = HERE / ".venv" / "bin" / "mk_prepare_receptor.py"
+# Flexible residues: up to this many, whose side chains have a heavy atom
+# within FLEX_CONTACT of the crystal ligand's heavy atoms, closest first.
+FLEX_RESIDUES = 3
+FLEX_CONTACT = 4.0
+# Side chains with a torsion; Meeko knows their templates.
+FLEX_KINDS = {"ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "HIS", "ILE", "LEU", "LYS",
+              "MET", "PHE", "SER", "THR", "TRP", "TYR", "VAL"}
+BACKBONE = {"N", "CA", "C", "O", "OXT"}
 
 RDLogger.DisableLog("rdApp.*")
 
@@ -161,6 +174,81 @@ def prepare(code: str, entry: Path, out: Path) -> dict:
     return meta
 
 
+def prepare_flex(out: Path) -> dict:
+    """Meeko's rigid and flexible receptor (`flex_rigid.pdbqt`, `flex.pdbqt`)
+    for the residues next to the crystal ligand, and a box covering the
+    ligand and the side chains. Cached in `flex.json`; raises if Meeko fails.
+    """
+    import gemmi
+
+    meta_path = out / "flex.json"
+    if not meta_path.exists():
+        meta_path.write_text(json.dumps(_prepare_flex(out, gemmi), indent=1))
+    meta = json.loads(meta_path.read_text())
+    if "error" in meta:
+        raise ValueError(f"flex preparation: {meta['error']}")
+    return meta
+
+
+def _prepare_flex(out: Path, gemmi) -> dict:
+    xtal = Chem.MolFromMolFile(str(out / "ligand_xtal.sdf"), removeHs=False)
+    ligand = np.array([xtal.GetConformer().GetAtomPosition(a.GetIdx())
+                       for a in xtal.GetAtoms() if a.GetAtomicNum() > 1])
+    found = []
+    for chain in gemmi.read_structure(str(out / "protein_dry.pdb"))[0]:
+        for res in chain:
+            if res.name not in FLEX_KINDS or res.seqid.icode.strip():
+                continue
+            side = [np.array(a.pos.tolist()) for a in res
+                    if a.name not in BACKBONE and a.element.name != "H"]
+            if not side:
+                continue
+            d = min(np.sqrt(((ligand - p) ** 2).sum(axis=1)).min() for p in side)
+            if d < FLEX_CONTACT:
+                found.append((d, f"{chain.name}:{res.seqid.num}"))
+    residues = [r for _, r in sorted(found)[:FLEX_RESIDUES]]
+    if not residues:
+        return {"error": "no side chain touches the ligand"}
+    base = out / "flex_prep"
+    try:
+        proc = subprocess.run([str(MK_PREPARE_RECEPTOR), "--read_pdb", str(out / "protein_dry.pdb"),
+                               "-o", str(base), "-p", "-a", "--default_altloc", "A",
+                               "-f", ",".join(residues)],
+                              capture_output=True, text=True, timeout=900)
+    except subprocess.TimeoutExpired:
+        return {"error": "Meeko timed out", "residues": residues}
+    rigid, flex = Path(f"{base}_rigid.pdbqt"), Path(f"{base}_flex.pdbqt")
+    if proc.returncode != 0 or not flex.exists():
+        tail = (proc.stderr or proc.stdout).strip().splitlines()[-1:] or [""]
+        return {"error": f"Meeko failed: {tail[0][:150]}", "residues": residues}
+    rigid.rename(out / "flex_rigid.pdbqt")
+    flex.rename(out / "flex.pdbqt")
+    side = np.array([[float(l[30:38]), float(l[38:46]), float(l[46:54])]
+                     for l in (out / "flex.pdbqt").read_text().splitlines()
+                     if l.startswith(("ATOM", "HETATM")) and l[77:79].strip() not in ("H", "HD")])
+    points = np.vstack([ligand, side])
+    lo, hi = points.min(axis=0), points.max(axis=0)
+    return {
+        "residues": residues,
+        "center": [round(float(c), 3) for c in (lo + hi) / 2],
+        "size": [round(float(s), 3) for s in hi - lo + BOX_PADDING],
+    }
+
+
+def strip_flex(text: str) -> str:
+    """A docking output without its flexible residues: the ligand alone in
+    each model."""
+    kept, inside = [], False
+    for line in text.splitlines():
+        if line.startswith("BEGIN_RES"):
+            inside = True
+        elif line.startswith("END_RES"):
+            inside = False
+        elif not inside:
+            kept.append(line)
+    return "\n".join(kept) + "\n"
+
+
 # --------------------------------------------------------------------------
 # Docking and rescoring
 # --------------------------------------------------------------------------
@@ -171,32 +259,43 @@ def tag(seed: int) -> str:
     return "" if seed == SEED else f"_s{seed}"
 
 
-def dock(tool: str, out: Path, meta: dict, cpu: int, scoring: str, seed: int) -> dict:
+def dock(tool: str, out: Path, meta: dict, cpu: int, scoring: str, seed: int,
+         flex: dict | None = None) -> dict:
+    """Dock with one tool and seed. With `flex` (from `prepare_flex`), dock
+    with the flexible side chains in its box; the full output is kept as
+    `*_flexout.pdbqt` and `*_out.pdbqt` holds the ligand alone."""
     result_path = out / f"{tool}{tag(seed)}_dock.json"
     if result_path.exists():
         return json.loads(result_path.read_text())
     poses = out / f"{tool}{tag(seed)}_out.pdbqt"
-    c, s = meta["center"], meta["size"]
+    written = out / f"{tool}{tag(seed)}_flexout.pdbqt" if flex else poses
+    c, s = (flex or meta)["center"], (flex or meta)["size"]
     rec, lig = str(out / "receptor.pdbqt"), str(out / "ligand_start.pdbqt")
+    extra = []
+    if flex:
+        rec = str(out / "flex_rigid.pdbqt")
+        extra = ["--flex", str(out / "flex.pdbqt")]
     env = None
     if tool == "vina":
-        cmd = [str(VINA), "--receptor", rec, "--ligand", lig,
+        cmd = [str(VINA), "--receptor", rec, *extra, "--ligand", lig,
                "--center_x", str(c[0]), "--center_y", str(c[1]), "--center_z", str(c[2]),
                "--size_x", str(s[0]), "--size_y", str(s[1]), "--size_z", str(s[2]),
                "--exhaustiveness", str(EXHAUSTIVENESS), "--num_modes", str(NUM_MODES),
                "--seed", str(seed), "--cpu", str(cpu), "--scoring", scoring,
-               "--out", str(poses)]
+               "--out", str(written)]
     else:
-        cmd = [str(RUSTDOCK), "dock", "--receptor", rec, "--ligand", lig,
+        cmd = [str(RUSTDOCK), "dock", "--receptor", rec, *extra, "--ligand", lig,
                # `=` keeps a negative first coordinate from reading as a flag.
                "--center=" + ",".join(map(str, c)), "--size=" + ",".join(map(str, s)),
                "--exhaustiveness", str(EXHAUSTIVENESS), "--num-modes", str(NUM_MODES),
-               "--seed", str(seed), "--scoring", scoring, "--out", str(poses)]
+               "--seed", str(seed), "--scoring", scoring, "--out", str(written)]
         env = {"RAYON_NUM_THREADS": str(cpu), "RUST_LOG": "warn",
                "PATH": "/usr/bin:/bin"}
     t0 = time.perf_counter()
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
     seconds = time.perf_counter() - t0
+    if flex and written.exists():
+        poses.write_text(strip_flex(written.read_text()))
     result = {"ok": proc.returncode == 0 and poses.exists(), "seconds": round(seconds, 2)}
     if not result["ok"]:
         result["error"] = (proc.stderr or proc.stdout).strip()[-2000:]
@@ -319,7 +418,8 @@ def vina_scores_top_pose(out: Path, scoring: str, seed: int) -> float | None:
     return float(m.group(1)) if m else None
 
 
-def evaluate(tool: str, out: Path, docked: dict, scoring: str, seed: int) -> dict:
+def evaluate(tool: str, out: Path, docked: dict, scoring: str, seed: int,
+             flex: bool = False) -> dict:
     row = {f"{tool}_seconds": docked["seconds"]}
     if not docked["ok"]:
         row[f"{tool}_error"] = docked.get("error", "")[:200]
@@ -340,7 +440,8 @@ def evaluate(tool: str, out: Path, docked: dict, scoring: str, seed: int) -> dic
         f"{tool}_pb_valid": valid,
         f"{tool}_pb_failed": failed,
     })
-    if tool == "rustdock":
+    # Vina would need the side chains to rescore a flex pose.
+    if tool == "rustdock" and not flex:
         row["rustdock_top_vina_score"] = vina_scores_top_pose(out, scoring, seed)
     return row
 
@@ -356,16 +457,20 @@ def run_complex(code: str, args: argparse.Namespace) -> dict[int, dict]:
     rows = {seed: {"code": code} for seed in args.seeds}
     try:
         meta = prepare(code, find_entry(args.pdbbind, code), out)
-        # The crystal-pose rescoring does not depend on the seed.
+        flex = prepare_flex(out) if args.flex else None
+        # The crystal-pose rescoring does not depend on the seed. With side
+        # chains it is not compared (tests/parity.rs checks flex scoring).
         rescored = {}
-        for tool in ("vina", "rustdock"):
+        for tool in ("vina", "rustdock") if not flex else ():
             rescored.update(rescore(tool, out, args.scoring))
         for seed, row in rows.items():
             row.update(heavy_atoms=meta["heavy_atoms"],
                        rotatable_bonds=meta["rotatable_bonds"])
+            if flex:
+                row["flex_residues"] = " ".join(flex["residues"])
             for tool in ("vina", "rustdock"):
-                docked = dock(tool, out, meta, args.cpu, args.scoring, seed)
-                row.update(evaluate(tool, out, docked, args.scoring, seed))
+                docked = dock(tool, out, meta, args.cpu, args.scoring, seed, flex)
+                row.update(evaluate(tool, out, docked, args.scoring, seed, bool(flex)))
             row.update(rescored)
     except Exception as exc:  # noqa: BLE001 - one bad entry must not stop the run
         for row in rows.values():
@@ -399,6 +504,13 @@ def run(args: argparse.Namespace) -> None:
                   f"vina {row.get('vina_rmsd_top1', '-')} A {row.get('vina_seconds', '-')} s | "
                   f"rustdock {row.get('rustdock_rmsd_top1', '-')} A "
                   f"{row.get('rustdock_seconds', '-')} s", flush=True)
+    if args.flex:
+        # Complexes without side chains to move are left out for both.
+        skipped = [c for c in codes if "prep_error" in by_code[c][args.seeds[0]]]
+        (args.work / "flex_excluded.tsv").write_text("".join(
+            f"{c}\t{by_code[c][args.seeds[0]]['prep_error']}\n" for c in skipped))
+        print(f"{len(skipped)} complexes without flexible residues, left out")
+        codes = [c for c in codes if c not in skipped]
     for seed in args.seeds:
         frame = pd.DataFrame([by_code[code][seed] for code in codes])
         frame.to_csv(args.work / f"results{tag(seed)}.csv", index=False)
@@ -471,6 +583,7 @@ def write_report(frame: pd.DataFrame, args: argparse.Namespace) -> None:
         f"{args.cpu} CPUs. Success = top pose within {SUCCESS_RMSD:g} A heavy-atom "
         "RMSD (symmetry-aware) of the crystal ligand.",
         "",
+        *([FLEX_PROTOCOL, ""] if args.flex else []),
         "| | AutoDock Vina | rustdock-vina |",
         "|---|---|---|",
         f"| Docked without error | {vina['docked']} | {rust['docked']} |",
@@ -519,6 +632,16 @@ def write_report(frame: pd.DataFrame, args: argparse.Namespace) -> None:
     report = args.report or (HERE / f"PARITY_{args.subset}{suffix}.md")
     report.write_text("\n".join(lines) + "\n")
     print(f"wrote {report}")
+
+
+FLEX_PROTOCOL = (
+    f"Flexible side chains: up to {FLEX_RESIDUES} residues whose side chains have a heavy "
+    f"atom within {FLEX_CONTACT:g} A of the crystal ligand, closest first, prepared with "
+    "Meeko's `mk_prepare_receptor.py --flexres` (rigid part and flexible residues) from "
+    "the same protein. The box covers the crystal ligand and the side chains plus "
+    f"{BOX_PADDING:g} A. Complexes Meeko cannot prepare are left out for both programs "
+    "(`flex_excluded.tsv` in the work directory). PoseBusters checks the top ligand pose "
+    "against the protein with its crystal side chains.")
 
 
 def report(args: argparse.Namespace) -> None:
@@ -592,6 +715,7 @@ def write_seed_report(args: argparse.Namespace) -> None:
         f"otherwise the protocol of the single-seed report. Rates are over all {n} "
         "complexes, as mean ± standard deviation over the seeds.",
         "",
+        *([FLEX_PROTOCOL, ""] if args.flex else []),
         "| | AutoDock Vina | rustdock-vina |",
         "|---|---|---|",
         f"| Docked without error (%) | {mean_sd('vina', 'docked')} | {mean_sd('rustdock', 'docked')} |",
@@ -654,6 +778,8 @@ def main() -> None:
         p.add_argument("--report", type=Path)
         p.add_argument("--seeds", type=int, nargs="+", default=[SEED],
                        help="docking seeds; the main report uses seed 42")
+        p.add_argument("--flex", action="store_true",
+                       help="dock with flexible side chains next to the ligand")
     sub.choices["run"].add_argument("--pdbbind", "--data", type=Path, required=True,
                                     help="dataset root: PDBbind (<group>/<code>/) or "
                                          "the PoseBusters benchmark set (<code>/)")
@@ -664,6 +790,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.work is None:
         name = "work" if args.subset != "posebusters" else "work-posebusters"
+        if args.flex:
+            name += "-flex"
         if args.scoring != "vina":
             name += f"-{args.scoring}"
         args.work = HERE / name
