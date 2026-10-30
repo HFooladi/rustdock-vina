@@ -82,8 +82,9 @@ complexes. Single-seed reports (seed 42) with every complex are also in
 
 ## Limitations
 
-- **Flexible side chains are not implemented.** `--flex` is rejected with
-  an error.
+- **Flexible side chains can be scored but not docked yet.**
+  `rustdock score --flex` scores them as Vina does; `rustdock dock --flex`
+  is rejected with an error.
 - **AD4 scoring is experimental.** It has not been validated against
   AutoDock4 and warns when selected.
 - **PDBQT is the only input format.** There is no preparation step, so
@@ -124,7 +125,7 @@ All `dock` options:
 |------|-------------|---------|
 | `--receptor <FILE>` | PDBQT file containing the receptor (required) | |
 | `--ligand <FILE>` | PDBQT file containing the ligand to dock | |
-| `--flex <FILE>` | **Not implemented**; passing it is an error | |
+| `--flex <FILE>` | **Not implemented for docking yet**; passing it is an error | |
 | `-c, --config <FILE>` | Configuration file for docking parameters | |
 | `--center <X,Y,Z>` | Center of the search box | |
 | `--size <X,Y,Z>` | Size of the search box | |
@@ -169,8 +170,23 @@ All `score` options:
 |------|-------------|---------|
 | `--receptor <FILE>` | PDBQT file containing the receptor (required) | |
 | `--ligand <FILE>` | PDBQT file containing the ligand pose (required) | |
-| `--flex <FILE>` | **Not implemented**; passing it is an error | |
+| `--flex <FILE>` | Flexible side chains, as for Vina's `--flex`; `--receptor` is then the rigid part | |
 | `--scoring <NAME>` | Scoring function: `vina`, `vinardo`, or experimental `ad4` | `vina` |
+
+With `--flex`, the breakdown adds the ligand's energy with the side chains,
+which is part of the intermolecular energy and the affinity, and the side
+chains' energies with the rigid receptor and with each other. As in Vina,
+those two are internal energies and do not enter the affinity. Each
+residue's ROOT atoms and the first atom of each branch off the ROOT (the CA
+and CB in Meeko's and ADT's files) stay fixed and are not scored against the
+receptor or the ligand.
+
+Vina's own `--score_only --flex` affinity differs from rustdock's. Vina
+subtracts an "unbound" energy that takes the side chains' energy with the
+receptor from its grid, while the internal energy it adds back takes it
+from exact pairs, so the two do not cancel. Passing Vina
+`--unbound_energy` equal to its printed internal energy (2) gives
+rustdock's affinity.
 
 ### Configuration file
 
