@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- During Monte Carlo the ligand-receptor energy is capped at 10 per atom, as
+  in Vina 1.2.7, not 1.5. 1.5 is the default of Vina's `monte_carlo`, but
+  `Vina::global_search` sets `hunt_cap` to `(10, 10, 10)` before docking
+  (`vina.cpp`). The parity tables are rerun with the fix.
+
 ### Added
 - `rustdock score --flex` scores a pose with flexible side chains as AutoDock
   Vina 1.2.7 does: the ligand against the side chains, the side chains against
