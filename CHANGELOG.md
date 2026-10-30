@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `rustdock score --flex` scores a pose with flexible side chains as AutoDock
+  Vina 1.2.7 does: the ligand against the side chains, the side chains against
+  the rigid receptor and against each other, with Vina's fixed atoms and pair
+  rules. `io::parse_flex_pdbqt` reads Vina's flex residue files and
+  `scoring::score_pose_with_flex` scores them.
+- `rustdock dock --flex` docks with flexible side chains as Vina 1.2.7 does:
+  the search turns their torsions with the ligand's (Vina's mutation,
+  randomization and BFGS over all of them), scores every moving atom on the
+  grid and every moving pair, and clusters modes on all moving heavy atoms.
+  Each output model has the moved residues after the ligand.
+  `MonteCarlo::target_with_flex` builds such a target, and
+  `DockingResult::flex` holds a pose's side chains. On three parity fixtures
+  docking reaches the same top pose as Vina, with top affinities within 0.03
+  kcal/mol.
 - `scoring::score_pose`, which scores a pose with any force field and returns
   the breakdown `rustdock score` prints.
 - A parity regression suite (`tests/parity.rs`) that runs in CI. It checks
@@ -15,11 +29,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Vina's docked poses against AutoDock Vina 1.2.7 to within 0.02 kcal/mol, on
   20 PoseBusters complexes. It also checks that docking 5 of them still finds
   the crystal pose. `benchmark/parity/make_golden.py` regenerates the fixtures.
+- The parity suite also scores 10 of its complexes with up to three flexible
+  side chains each, prepared with Meeko, and checks every flex energy term
+  against Vina 1.2.7's `--score_only --flex` to within 0.02 kcal/mol. It
+  docks three of them with their side chains and checks the top affinity
+  against Vina's (`flex_docking_matches_vina`).
 - The parity harness docks with several seeds (`--seeds`) and several
   complexes at once on pinned cores (`--jobs`), and reports success rates
   over seeds with a paired comparison. The README's parity tables now come
   from five seeds; the Vina-scoring reports are rerun since the bond-inference
   fix.
+
+### Changed
+- Reading a docking output with flexible side chains as a ligand stops at
+  the first `BEGIN_RES`, so only the ligand is read.
+- BRANCH records are matched to atoms by serial number, as Vina does, not by
+  position in the file, and a BRANCH naming an atom that has not been read is
+  an error instead of being skipped.
 
 ## [0.2.0] - 2026-10-19
 

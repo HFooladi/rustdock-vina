@@ -6,6 +6,10 @@ use std::collections::HashMap;
 use std::f64::consts::PI;
 use thiserror::Error;
 
+mod flex;
+
+pub use flex::FlexResidues;
+
 /// Indices of two atoms in a molecule.
 type AtomPair = (usize, usize);
 

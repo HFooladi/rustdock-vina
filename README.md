@@ -18,6 +18,8 @@ output files can be read and rescored by Vina.
   set of receptor grids
 - PDBQT output in Vina's layout that keeps the input ligand's records, so
   Meeko and Vina read it back
+- Flexible receptor side chains (`--flex`, Vina's flex residue PDBQT),
+  searched and scored as Vina does
 - Reproducible runs with `--seed`
 - Experimental AutoDock4 scoring (`--scoring ad4`; not validated)
 
@@ -82,8 +84,6 @@ complexes. Single-seed reports (seed 42) with every complex are also in
 
 ## Limitations
 
-- **Flexible side chains are not implemented.** `--flex` is rejected with
-  an error.
 - **AD4 scoring is experimental.** It has not been validated against
   AutoDock4 and warns when selected.
 - **PDBQT is the only input format.** There is no preparation step, so
@@ -124,7 +124,7 @@ All `dock` options:
 |------|-------------|---------|
 | `--receptor <FILE>` | PDBQT file containing the receptor (required) | |
 | `--ligand <FILE>` | PDBQT file containing the ligand to dock | |
-| `--flex <FILE>` | **Not implemented**; passing it is an error | |
+| `--flex <FILE>` | Flexible side chains, as for Vina's `--flex`; `--receptor` is then the rigid part | |
 | `-c, --config <FILE>` | Configuration file for docking parameters | |
 | `--center <X,Y,Z>` | Center of the search box | |
 | `--size <X,Y,Z>` | Size of the search box | |
@@ -139,6 +139,27 @@ All `dock` options:
 | `--seed <N>` | Random seed; the same seed and inputs give the same poses | random |
 | `--grid-spacing <A>` | Spacing of the precomputed affinity grids | `0.375` |
 | `--no-grid` | Search on exact pairwise energies (slow) | |
+
+### Flexible side chains
+
+```bash
+rustdock dock --receptor protein_rigid.pdbqt --flex protein_flex.pdbqt \
+  --ligand ligand.pdbqt --center 0,0,0 --size 20,20,20 -o out.pdbqt
+```
+
+The side chains come in Vina's two files: the flexible residues as
+`BEGIN_RES`…`END_RES` blocks, and the rigid receptor without them, as
+Meeko's `mk_prepare_receptor.py --flexres` (or ADT's
+`prepare_flexreceptor4.py`) writes them. As in Vina, the search turns each
+residue's torsions along with the ligand's, and each mode in the output
+file has the moved residues after the ligand. The side chains' energy with
+the ligand counts toward the affinity; their energy with the rest of the
+receptor and with each other is internal and only ranks the modes. The box
+must cover the side chains as well as the ligand.
+
+On the parity fixtures, rustdock and Vina 1.2.7 reach the same top pose with
+flexible side chains, and their top affinities agree to within 0.03
+kcal/mol (`flex_docking_matches_vina` in `tests/parity.rs`).
 
 ### Screening a library
 
@@ -169,8 +190,23 @@ All `score` options:
 |------|-------------|---------|
 | `--receptor <FILE>` | PDBQT file containing the receptor (required) | |
 | `--ligand <FILE>` | PDBQT file containing the ligand pose (required) | |
-| `--flex <FILE>` | **Not implemented**; passing it is an error | |
+| `--flex <FILE>` | Flexible side chains, as for Vina's `--flex`; `--receptor` is then the rigid part | |
 | `--scoring <NAME>` | Scoring function: `vina`, `vinardo`, or experimental `ad4` | `vina` |
+
+With `--flex`, the breakdown adds the ligand's energy with the side chains,
+which is part of the intermolecular energy and the affinity, and the side
+chains' energies with the rigid receptor and with each other. As in Vina,
+those two are internal energies and do not enter the affinity. Each
+residue's ROOT atoms and the first atom of each branch off the ROOT (the CA
+and CB in Meeko's and ADT's files) stay fixed and are not scored against the
+receptor or the ligand.
+
+Vina's own `--score_only --flex` affinity differs from rustdock's. Vina
+subtracts an "unbound" energy that takes the side chains' energy with the
+receptor from its grid, while the internal energy it adds back takes it
+from exact pairs, so the two do not cancel. Passing Vina
+`--unbound_energy` equal to its printed internal energy (2) gives
+rustdock's affinity.
 
 ### Configuration file
 

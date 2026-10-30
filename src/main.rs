@@ -8,10 +8,11 @@ use rayon::prelude::*;
 use rustdock_vina::forcefield::{
     ad4::AD4ForceField, vina::VinaForceField, vinardo::VinardoForceField, ForceField,
 };
-use rustdock_vina::io::{parse_pdbqt, write_docking_results};
+use rustdock_vina::io::{parse_flex_pdbqt, parse_pdbqt, write_docking_results};
 use rustdock_vina::optimization::monte_carlo::{MonteCarlo, MonteCarloParams, Target};
 use rustdock_vina::optimization::DockingResult;
-use rustdock_vina::scoring::score_pose;
+use rustdock_vina::scoring::score_pose_with_flex;
+use rustdock_vina::FlexResidues;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -43,7 +44,9 @@ enum Commands {
         #[clap(long, value_parser)]
         ligand: Vec<PathBuf>,
 
-        /// Flexible receptor residues (not implemented; rejected)
+        /// Flexible side chains (PDBQT of BEGIN_RES/END_RES blocks, as for
+        /// Vina's --flex); --receptor is then the rigid part. Their torsions
+        /// are searched with the ligand's and written after it in each mode
         #[clap(long, value_parser)]
         flex: Option<PathBuf>,
 
@@ -117,7 +120,8 @@ enum Commands {
         #[clap(long, value_parser)]
         ligand: PathBuf,
 
-        /// Flexible receptor residues (not implemented; rejected)
+        /// Flexible side chains (PDBQT of BEGIN_RES/END_RES blocks, as for
+        /// Vina's --flex); --receptor is then the rigid part
         #[clap(long, value_parser)]
         flex: Option<PathBuf>,
 
@@ -158,8 +162,6 @@ fn main() -> Result<()> {
             no_grid,
             seed,
         } => {
-            reject_flex(flex.as_deref())?;
-
             // Determine scoring function
             let forcefield = select_forcefield(&scoring)?;
 
@@ -246,8 +248,26 @@ fn main() -> Result<()> {
                 ..MonteCarloParams::default()
             });
             // Every ligand shares one set of receptor grids.
-            let target =
-                optimizer.target(receptor_molecule, forcefield.as_ref(), center, box_size)?;
+            let target = match &flex {
+                Some(path) => {
+                    info!("Loading flexible residues: {}", path.display());
+                    let flex_residues =
+                        parse_flex_pdbqt(path, &receptor_molecule).with_context(|| {
+                            format!("Failed to parse flex residue file: {}", path.display())
+                        })?;
+                    warn_flex_outside_box(&flex_residues, &center, &box_size);
+                    optimizer.target_with_flex(
+                        receptor_molecule,
+                        flex_residues,
+                        forcefield.as_ref(),
+                        center,
+                        box_size,
+                    )?
+                }
+                None => {
+                    optimizer.target(receptor_molecule, forcefield.as_ref(), center, box_size)?
+                }
+            };
             let job = DockJob {
                 optimizer: &optimizer,
                 target: &target,
@@ -321,8 +341,6 @@ fn main() -> Result<()> {
             flex,
             scoring,
         } => {
-            reject_flex(flex.as_deref())?;
-
             // Determine scoring function
             let forcefield = select_forcefield(&scoring)?;
 
@@ -338,15 +356,37 @@ fn main() -> Result<()> {
             info!("Loading ligand: {}", ligand.display());
             let ligand_molecule = parse_pdbqt(&ligand)
                 .with_context(|| format!("Failed to parse ligand file: {}", ligand.display()))?;
+            let flex_residues = flex
+                .as_ref()
+                .map(|path| {
+                    info!("Loading flexible residues: {}", path.display());
+                    parse_flex_pdbqt(path, &receptor_molecule).with_context(|| {
+                        format!("Failed to parse flex residue file: {}", path.display())
+                    })
+                })
+                .transpose()?;
 
             println!("\nLigand atoms: {}", ligand_molecule.atoms.len());
             println!("Ligand bonds: {}", ligand_molecule.bonds.len());
             println!("Ligand torsions: {}", ligand_molecule.torsions.len());
             println!("Receptor atoms: {}", receptor_molecule.atoms.len());
+            if let Some(flex) = &flex_residues {
+                println!(
+                    "Flexible residues: {} ({} atoms, {} torsions)",
+                    flex.num_residues(),
+                    flex.molecule.atoms.len(),
+                    flex.molecule.torsions.len()
+                );
+            }
 
             // Vina formula: affinity = intermolecular / (1 + weight_rot * num_tors)
             // The internal energy cancels with unbound energy in the full formula
-            let score = score_pose(&ligand_molecule, &receptor_molecule, forcefield.as_ref())?;
+            let score = score_pose_with_flex(
+                &ligand_molecule,
+                &receptor_molecule,
+                flex_residues.as_ref(),
+                forcefield.as_ref(),
+            )?;
             let torsional_effect = score.intermolecular - score.affinity;
 
             println!("\nScoring breakdown:");
@@ -354,6 +394,21 @@ fn main() -> Result<()> {
             println!("  Positive energy (repulsion): {:.3}", score.positive);
             println!("  Negative energy (attraction): {:.3}", score.negative);
             println!("  Intermolecular energy: {:.3}", score.intermolecular);
+            if flex_residues.is_some() {
+                println!(
+                    "    Ligand - Receptor: {:.3}",
+                    score.intermolecular - score.ligand_flex
+                );
+                println!("    Ligand - Flex side chains: {:.3}", score.ligand_flex);
+                println!(
+                    "  Flex - Receptor (internal, not in the affinity): {:.3}",
+                    score.flex_receptor
+                );
+                println!(
+                    "  Flex - Flex side chains (internal, not in the affinity): {:.3}",
+                    score.flex_flex
+                );
+            }
             println!(
                 "  Torsional effect: {:.3} ({} torsions, weighted count {})",
                 torsional_effect,
@@ -419,18 +474,26 @@ fn parse_config(config_str: &str) -> Result<(Vector3<f64>, Vector3<f64>)> {
     }
 }
 
-/// Refuse `--flex`, which is not implemented.
+/// Warn about flexible side-chain atoms outside the search box.
 ///
-/// Silently docking against a rigid receptor would hand the user results they
-/// believe include flexible side chains.
-fn reject_flex(flex: Option<&Path>) -> Result<()> {
-    match flex {
-        Some(path) => Err(anyhow::anyhow!(
-            "--flex is not implemented: flexible receptor residues are not \
-             supported yet (got {})",
-            path.display()
-        )),
-        None => Ok(()),
+/// As in Vina, every moving atom is charged a steep penalty per Angstrom
+/// outside the box, so a side chain that starts or must stay outside it
+/// distorts the search.
+fn warn_flex_outside_box(flex: &FlexResidues, center: &Vector3<f64>, size: &Vector3<f64>) {
+    let half = size * 0.5;
+    let outside = flex
+        .movable_atoms()
+        .filter(|a| !a.atom_type.is_hydrogen())
+        .filter(|a| {
+            let d = a.coordinates - center;
+            (0..3).any(|k| d[k].abs() > half[k])
+        })
+        .count();
+    if outside > 0 {
+        warn!(
+            "{outside} moving side-chain atoms lie outside the search box; \
+             enlarge the box to cover the flexible residues"
+        );
     }
 }
 

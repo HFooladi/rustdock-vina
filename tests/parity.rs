@@ -9,10 +9,10 @@ use nalgebra::Vector3;
 use rustdock_vina::forcefield::vina::VinaForceField;
 use rustdock_vina::forcefield::vinardo::VinardoForceField;
 use rustdock_vina::forcefield::ForceField;
-use rustdock_vina::io::parse_pdbqt;
+use rustdock_vina::io::{parse_flex_pdbqt, parse_pdbqt};
 use rustdock_vina::optimization::monte_carlo::{MonteCarlo, MonteCarloParams};
-use rustdock_vina::scoring::score_pose;
-use rustdock_vina::Molecule;
+use rustdock_vina::scoring::{score_pose, score_pose_with_flex};
+use rustdock_vina::{FlexResidues, Molecule};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -59,9 +59,30 @@ impl Complex {
         self.0["dock"] == "True"
     }
 
+    /// Whether the complex has flexible side chains (`flex.pdbqt`).
+    fn flexible(&self) -> bool {
+        self.0.get("flex_residues").is_some_and(|r| !r.is_empty())
+    }
+
     fn load(&self, file: &str) -> Molecule {
         let path = data_dir().join(self.code()).join(file);
         parse_pdbqt(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    /// The rigid receptor and flexible side chains.
+    fn load_flex(&self) -> (Molecule, FlexResidues) {
+        let rigid = self.load("flex_rigid.pdbqt");
+        let path = data_dir().join(self.code()).join("flex.pdbqt");
+        let flex =
+            parse_flex_pdbqt(&path, &rigid).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        (rigid, flex)
+    }
+
+    /// Whether Vina docked the complex with its flexible side chains.
+    fn flex_docked(&self) -> bool {
+        self.0
+            .get("vina_flex_dock_affinity")
+            .is_some_and(|v| !v.is_empty())
     }
 }
 
@@ -115,6 +136,44 @@ fn check_scores(forcefield: &dyn ForceField, ligand: &str, prefix: &str) {
     );
 }
 
+/// Scores the crystal pose of every complex with flexible side chains and
+/// compares each energy term with Vina's `<scoring>_flex_*` columns.
+fn check_flex_scores(forcefield: &dyn ForceField, scoring: &str) {
+    let complexes: Vec<_> = golden().into_iter().filter(Complex::flexible).collect();
+    assert!(
+        complexes.len() >= 5,
+        "golden.tsv has too few flex complexes"
+    );
+    let mut failures = Vec::new();
+    for complex in &complexes {
+        let (rigid, flex) = complex.load_flex();
+        let pose = complex.load("ligand_xtal.pdbqt");
+        let score = score_pose_with_flex(&pose, &rigid, Some(&flex), forcefield).expect("score");
+        for (name, ours) in [
+            ("inter", score.intermolecular),
+            ("affinity", score.affinity),
+            ("lig_flex", score.ligand_flex),
+            ("flex_rec", score.flex_receptor),
+            ("flex_flex", score.flex_flex),
+        ] {
+            let vina = complex.value(&format!("{scoring}_flex_{name}"));
+            if (ours - vina).abs() > SCORE_TOLERANCE {
+                failures.push(format!(
+                    "{} {name}: rustdock {ours:.3}, Vina {vina:.3} (diff {:+.3})",
+                    complex.code(),
+                    ours - vina
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} flex scores differ from Vina 1.2.7 by more than {SCORE_TOLERANCE}:\n  {}",
+        forcefield.name(),
+        failures.join("\n  ")
+    );
+}
+
 #[test]
 fn crystal_scores_match_vina() {
     check_scores(&VinaForceField::default(), "ligand_xtal.pdbqt", "vina_xtal");
@@ -127,6 +186,16 @@ fn crystal_scores_match_vinardo() {
         "ligand_xtal.pdbqt",
         "vinardo_xtal",
     );
+}
+
+#[test]
+fn crystal_flex_scores_match_vina() {
+    check_flex_scores(&VinaForceField::default(), "vina");
+}
+
+#[test]
+fn crystal_flex_scores_match_vinardo() {
+    check_flex_scores(&VinardoForceField::default(), "vinardo");
 }
 
 /// Vina's own top docked pose, read from its output, scores as Vina scores it.
@@ -193,6 +262,69 @@ fn docking_finds_crystal_pose() {
             complex.value("vina_dock_rmsd")
         );
         if rmsd >= DOCK_RMSD_LIMIT {
+            failures.push(format!("{}: top-1 RMSD {rmsd:.2} A", complex.code()));
+        }
+        if affinity > vina + DOCK_AFFINITY_SLACK {
+            failures.push(format!(
+                "{}: affinity {affinity:.3}, Vina {vina:.3}",
+                complex.code()
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Docking with flexible side chains reaches Vina's top affinity, and on the
+/// complex where Vina also finds the crystal pose (`flex_dock`), so does
+/// rustdock.
+#[test]
+#[ignore = "slow in debug builds; CI runs it with --release -- --ignored"]
+fn flex_docking_matches_vina() {
+    let forcefield = VinaForceField::default();
+    let optimizer = MonteCarlo::with_params(MonteCarloParams {
+        seed: Some(42),
+        ..MonteCarloParams::default()
+    });
+    let docked: Vec<_> = golden().into_iter().filter(Complex::flex_docked).collect();
+    assert!(
+        !docked.is_empty(),
+        "golden.tsv has no flex docking complexes"
+    );
+    assert!(docked.iter().any(|c| c.0["flex_dock"] == "True"));
+
+    let mut failures = Vec::new();
+    for complex in &docked {
+        let (rigid, flex) = complex.load_flex();
+        let ligand = complex.load("ligand_start.pdbqt");
+        let crystal = complex.load("ligand_xtal.pdbqt");
+        let target = optimizer
+            .target_with_flex(
+                rigid,
+                flex,
+                &forcefield,
+                complex.vector("flex_center"),
+                complex.vector("flex_size"),
+            )
+            .expect("target");
+        let results = optimizer
+            .dock_into(&target, &ligand, &forcefield, 9, 0)
+            .expect("dock");
+        let top = results.first().expect("at least one pose");
+        assert!(
+            top.flex.is_some(),
+            "{}: no side chains in the result",
+            complex.code()
+        );
+        let affinity =
+            forcefield.apply_torsional_normalization(top.energy, ligand.vina_torsion_count());
+        let rmsd = heavy_rmsd(&top.molecule, &crystal);
+        let vina = complex.value("vina_flex_dock_affinity");
+        println!(
+            "{}: affinity {affinity:.3} (Vina {vina:.3}), top-1 RMSD {rmsd:.2} A (Vina {:.2})",
+            complex.code(),
+            complex.value("vina_flex_dock_rmsd")
+        );
+        if complex.0["flex_dock"] == "True" && rmsd >= DOCK_RMSD_LIMIT {
             failures.push(format!("{}: top-1 RMSD {rmsd:.2} A", complex.code()));
         }
         if affinity > vina + DOCK_AFFINITY_SLACK {

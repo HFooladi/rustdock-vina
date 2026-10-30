@@ -1,14 +1,14 @@
 //! Input/output functionality for molecular docking
 
 use nalgebra::Vector3;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use thiserror::Error;
 
 use crate::atom::{Atom, AtomType};
-use crate::molecule::{Bond, Molecule, Torsion};
+use crate::molecule::{Bond, FlexResidues, Molecule, Torsion};
 
 /// Errors that can occur during file I/O operations
 #[derive(Error, Debug)]
@@ -38,15 +38,8 @@ pub fn parse_pdbqt<P: AsRef<Path>>(path: P) -> Result<Molecule, IoError> {
             .unwrap_or("unknown"),
     );
 
-    // Keep track of branch structure for building torsions
-    let mut branch_stack: Vec<(usize, usize)> = Vec::new();
-    let mut branch_atoms: Vec<Vec<usize>> = Vec::new();
-    let mut current_branch_atoms: Vec<usize> = Vec::new();
-    // Rigid fragment of each atom: the ROOT is 0, each BRANCH opens a new one.
-    let mut fragment_of: Vec<usize> = Vec::new();
-    let mut fragment_stack: Vec<usize> = vec![0];
-    // The atom each fragment hangs from (its BRANCH's first atom).
-    let mut fragment_parent: Vec<Option<usize>> = vec![None];
+    let mut tree = TreeBuilder::default();
+    let mut fragments = Fragments::default();
 
     // Track model number for multi-model files
     let mut model_number = 1;
@@ -60,6 +53,11 @@ pub fn parse_pdbqt<P: AsRef<Path>>(path: P) -> Result<Molecule, IoError> {
         if line.trim().is_empty() || line.starts_with('#') {
             continue;
         }
+        // Docking output with flexible side chains has them after the
+        // ligand in each model; they are not part of it.
+        if line.starts_with("BEGIN_RES") {
+            break;
+        }
 
         // Keep the file's own records for the writer. Model delimiters and
         // the score remarks of a previous docking run are not part of the
@@ -72,13 +70,9 @@ pub fn parse_pdbqt<P: AsRef<Path>>(path: P) -> Result<Molecule, IoError> {
         if line.starts_with("ATOM") || line.starts_with("HETATM") {
             // Parse atom record
             let atom = parse_pdbqt_atom(&line, line_number)?;
+            let serial = atom.serial;
             let atom_idx = molecule.add_atom(atom);
-            fragment_of.push(*fragment_stack.last().unwrap_or(&0));
-
-            // Add to current branch if any
-            if !branch_stack.is_empty() {
-                current_branch_atoms.push(atom_idx);
-            }
+            tree.atom(atom_idx, serial, &mut fragments);
         } else if line.starts_with("MODEL") {
             // Start a new model
             if model_number > 1 {
@@ -90,82 +84,9 @@ pub fn parse_pdbqt<P: AsRef<Path>>(path: P) -> Result<Molecule, IoError> {
             // End of a model
             break;
         } else if line.starts_with("BRANCH") {
-            // Parse BRANCH record
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() != 3 {
-                return Err(IoError::Parse {
-                    line: line_number,
-                    message: format!("Invalid BRANCH record: {}", line),
-                });
-            }
-
-            let from_atom: usize = parts[1].parse().map_err(|_| IoError::Parse {
-                line: line_number,
-                message: format!("Invalid BRANCH from atom: {}", parts[1]),
-            })?;
-
-            let to_atom: usize = parts[2].parse().map_err(|_| IoError::Parse {
-                line: line_number,
-                message: format!("Invalid BRANCH to atom: {}", parts[2]),
-            })?;
-
-            // Convert 1-based indices from PDBQT to 0-based indices
-            let from_atom = from_atom - 1;
-            let to_atom = to_atom - 1;
-
-            // Push current branch atoms onto stack (if any)
-            if !current_branch_atoms.is_empty() {
-                branch_atoms.push(current_branch_atoms.clone());
-            }
-
-            // Start a new branch - store atom indices for later bond creation
-            branch_stack.push((from_atom, to_atom));
-            current_branch_atoms = Vec::new();
-            fragment_stack.push(fragment_parent.len());
-            fragment_parent.push(Some(from_atom));
+            tree.branch(&line, line_number, &mut fragments)?;
         } else if line.starts_with("ENDBRANCH") {
-            // Parse ENDBRANCH record
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() != 3 {
-                return Err(IoError::Parse {
-                    line: line_number,
-                    message: format!("Invalid ENDBRANCH record: {}", line),
-                });
-            }
-            if fragment_stack.len() > 1 {
-                fragment_stack.pop();
-            }
-
-            if let Some((from_atom, to_atom)) = branch_stack.pop() {
-                // Now both atoms should exist - create the rotatable bond
-                if from_atom < molecule.atoms.len() && to_atom < molecule.atoms.len() {
-                    // Add the rotatable bond
-                    let bond_idx = molecule.bonds.len();
-                    molecule.bonds.push(Bond {
-                        atom1_idx: from_atom,
-                        atom2_idx: to_atom,
-                        rotatable: true,
-                    });
-
-                    // Create a torsion for this rotatable bond
-                    let torsion = Torsion {
-                        bond_idx,
-                        moving_atoms: current_branch_atoms.clone(),
-                        angle: 0.0, // Default angle
-                    };
-                    molecule.torsions.push(torsion);
-                }
-
-                // Restore previous branch's atoms and add current branch atoms to it
-                let branch_atom_copy = current_branch_atoms.clone();
-                if !branch_atoms.is_empty() {
-                    current_branch_atoms = branch_atoms.pop().unwrap();
-                    // Add atoms from this branch to parent branch
-                    current_branch_atoms.extend(branch_atom_copy);
-                } else {
-                    current_branch_atoms = Vec::new();
-                }
-            }
+            tree.end_branch(&line, line_number, &mut molecule, &mut fragments)?;
         } else if line.starts_with("TORSDOF") {
             // Number of torsional degrees of freedom
             // This is just informational, but we could use it to validate
@@ -181,13 +102,329 @@ pub fn parse_pdbqt<P: AsRef<Path>>(path: P) -> Result<Molecule, IoError> {
     // Always infer connectivity. BRANCH records only describe the rotatable
     // bonds (6 for a typical drug-like ligand), which is nowhere near the full
     // bond graph that atom typing needs.
-    infer_bonds(&mut molecule, &fragment_of, &fragment_parent);
+    infer_bonds(&mut molecule, |a, b| fragments.rigid(a, b));
 
     // Hydrophobicity and donor status depend on connectivity, so they can only
     // be assigned once bonds exist.
     molecule.assign_xs_types();
 
     Ok(molecule)
+}
+
+/// Parse a flexible residue PDBQT (Vina's `--flex`) for the rigid receptor
+/// `rigid`.
+///
+/// Each `BEGIN_RES`…`END_RES` block has a ROOT and BRANCHes, each one a
+/// torsion. The ROOT atoms stay fixed, and so does the first atom of each
+/// branch off the ROOT, which lies on its rotation axis. The fixed atoms
+/// are bonded to the rigid receptor's atoms as well as the residue's own,
+/// as Vina does, so a CA whose N is in the rigid file is typed as bonded to
+/// a heteroatom.
+pub fn parse_flex_pdbqt<P: AsRef<Path>>(
+    path: P,
+    rigid: &Molecule,
+) -> Result<FlexResidues, IoError> {
+    let file = File::open(path.as_ref())?;
+    let mut molecule = Molecule::new(
+        path.as_ref()
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("flex"),
+    );
+    let mut residue_of = Vec::new();
+    let mut fragments = Fragments::default();
+    let mut tree = TreeBuilder::default();
+    let mut residue: Option<usize> = None;
+    let mut residues = 0;
+
+    for (line_number, line) in BufReader::new(file).lines().enumerate() {
+        let line = line?;
+        let line_number = line_number + 1;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if !is_score_remark(&line) {
+            molecule.pdbqt_records.push(line.clone());
+        }
+        let outside = |what: &str| IoError::Parse {
+            line: line_number,
+            message: format!("{what} outside a BEGIN_RES/END_RES block: {line}"),
+        };
+
+        if line.starts_with("BEGIN_RES") {
+            if residue.is_some() {
+                return Err(IoError::Parse {
+                    line: line_number,
+                    message: "BEGIN_RES before the previous END_RES".to_string(),
+                });
+            }
+            residue = Some(residues);
+            residues += 1;
+            // Serials and open branches are per residue; fragment numbers
+            // are not, and every residue's ROOT is in fragment 0, as all of
+            // Vina's fixed flex atoms are rigid relative to each other.
+            tree = TreeBuilder::default();
+        } else if line.starts_with("END_RES") {
+            if residue.take().is_none() || !tree.open.is_empty() {
+                return Err(IoError::Parse {
+                    line: line_number,
+                    message: format!("unbalanced END_RES: {line}"),
+                });
+            }
+        } else if line.starts_with("ATOM") || line.starts_with("HETATM") {
+            let index = residue.ok_or_else(|| outside("atom"))?;
+            let atom = parse_pdbqt_atom(&line, line_number)?;
+            let serial = atom.serial;
+            let atom_idx = molecule.add_atom(atom);
+            residue_of.push(index);
+            tree.atom(atom_idx, serial, &mut fragments);
+        } else if line.starts_with("ENDBRANCH") {
+            residue.ok_or_else(|| outside("ENDBRANCH"))?;
+            tree.end_branch(&line, line_number, &mut molecule, &mut fragments)?;
+        } else if line.starts_with("BRANCH") {
+            residue.ok_or_else(|| outside("BRANCH"))?;
+            tree.branch(&line, line_number, &mut fragments)?;
+        } else if line.starts_with("MODEL") || line.starts_with("ENDMDL") {
+            return Err(IoError::InvalidFormat(format!(
+                "{}: a flex residue file has one model; split it first",
+                path.as_ref().display()
+            )));
+        }
+        // ROOT/ENDROOT, REMARK and anything else carry nothing to model.
+    }
+    if residue.is_some() {
+        return Err(IoError::InvalidFormat(format!(
+            "{}: missing END_RES",
+            path.as_ref().display()
+        )));
+    }
+    molecule.is_rigid = molecule.torsions.is_empty();
+
+    // Vina's rigid bodies: a branch's first atom lies on its rotation axis,
+    // so it moves with the parent's body, not its own. The ROOT's body,
+    // with the first atom of every branch off it, never moves.
+    let body_of: Vec<usize> = (0..molecule.atoms.len())
+        .map(|i| {
+            let f = fragments.of[i];
+            match fragments.parent[f] {
+                Some(parent) if fragments.first[f] == Some(i) => fragments.of[parent],
+                _ => f,
+            }
+        })
+        .collect();
+    let mut flex = FlexResidues {
+        fixed: body_of.iter().map(|&b| b == 0).collect(),
+        molecule,
+        residue_of,
+        body_of,
+        axis: fragments.parent.into_iter().zip(fragments.first).collect(),
+    };
+    type_flex_atoms(&mut flex, rigid);
+    Ok(flex)
+}
+
+/// Infer the flex residues' bonds and assign their XS types.
+///
+/// Vina infers bonds over the rigid and flex atoms together, between atoms
+/// that cannot move relative to each other. The fixed flex atoms then also
+/// bond to the rigid receptor's atoms, which can make a fixed carbon polar.
+/// The rigid atoms near a fixed atom join the bond inference; only the
+/// bonds among flex atoms are kept.
+fn type_flex_atoms(flex: &mut FlexResidues, rigid: &Molecule) {
+    // Far enough for a bond to a fixed atom, and for an atom between them.
+    const REACH: f64 = 4.0;
+    let n = flex.molecule.atoms.len();
+    let fixed: Vec<_> = flex
+        .molecule
+        .atoms
+        .iter()
+        .zip(&flex.fixed)
+        .filter(|(_, &f)| f)
+        .map(|(a, _)| a.coordinates)
+        .collect();
+    let mut combined = flex.molecule.clone();
+    for atom in &rigid.atoms {
+        if fixed
+            .iter()
+            .any(|r| (r - atom.coordinates).norm_squared() < REACH * REACH)
+        {
+            combined.add_atom(atom.clone());
+        }
+    }
+    // The rigid atoms cannot move relative to each other or to the fixed
+    // flex atoms.
+    let still = |i: usize| i >= n || flex.fixed[i];
+    infer_bonds(&mut combined, |a, b| {
+        if a < n && b < n {
+            !flex.variable(a, b)
+        } else {
+            still(a) && still(b)
+        }
+    });
+    combined.assign_xs_types();
+
+    combined.atoms.truncate(n);
+    combined
+        .bonds
+        .retain(|b| b.atom1_idx < n && b.atom2_idx < n);
+    flex.molecule.atoms = combined.atoms;
+    flex.molecule.bonds = combined.bonds;
+}
+
+/// The rigid fragments of a torsion tree, which decide which atoms can bond
+/// and which pairs can move relative to each other.
+struct Fragments {
+    /// Fragment of each atom: the ROOT is 0, each BRANCH opens a new one.
+    of: Vec<usize>,
+    /// The atom each fragment hangs from (the first atom of its BRANCH
+    /// record).
+    parent: Vec<Option<usize>>,
+    /// Each fragment's first atom, bonded to its parent (the second atom of
+    /// its BRANCH record), once the branch is closed.
+    first: Vec<Option<usize>>,
+}
+
+impl Fragments {
+    /// Whether atoms `a` and `b` cannot move relative to each other: they
+    /// are in the same fragment, or one is the atom the other's fragment
+    /// hangs from.
+    fn rigid(&self, a: usize, b: usize) -> bool {
+        match (self.of.get(a), self.of.get(b)) {
+            (Some(&fa), Some(&fb)) => {
+                fa == fb
+                    || self.parent.get(fb) == Some(&Some(a))
+                    || self.parent.get(fa) == Some(&Some(b))
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Default for Fragments {
+    fn default() -> Self {
+        Self {
+            of: Vec::new(),
+            parent: vec![None],
+            first: vec![None],
+        }
+    }
+}
+
+/// Builds a ligand's or flexible residue's torsions from its BRANCH and
+/// ENDBRANCH records.
+///
+/// BRANCH records name atoms by serial number, which Vina looks up among the
+/// atoms read so far, so a flex residue file keeps the receptor's serials.
+struct TreeBuilder {
+    /// Open branches: the atom each hangs from, and the serial of its first
+    /// atom (not yet read when the BRANCH record is).
+    open: Vec<(usize, u32)>,
+    /// The moving atoms of each open branch, innermost last.
+    moving: Vec<Vec<usize>>,
+    /// The fragment of each open branch, with the ROOT's at the bottom.
+    fragment_stack: Vec<usize>,
+    /// Atom index of each serial in the current ligand or residue.
+    serials: HashMap<u32, usize>,
+}
+
+impl Default for TreeBuilder {
+    fn default() -> Self {
+        Self {
+            open: Vec::new(),
+            moving: Vec::new(),
+            fragment_stack: vec![0],
+            serials: HashMap::new(),
+        }
+    }
+}
+
+impl TreeBuilder {
+    /// Record the atom just added at `index`.
+    fn atom(&mut self, index: usize, serial: u32, fragments: &mut Fragments) {
+        fragments.of.push(*self.fragment_stack.last().unwrap_or(&0));
+        self.serials.insert(serial, index);
+        // An atom moves with every enclosing branch; ENDBRANCH passes a
+        // branch's atoms on to its parent.
+        if let Some(moving) = self.moving.last_mut() {
+            moving.push(index);
+        }
+    }
+
+    fn branch(
+        &mut self,
+        line: &str,
+        line_number: usize,
+        fragments: &mut Fragments,
+    ) -> Result<(), IoError> {
+        let (from, to) = branch_serials(line, line_number)?;
+        let from = self.lookup(from, line, line_number)?;
+        self.open.push((from, to));
+        self.moving.push(Vec::new());
+        self.fragment_stack.push(fragments.parent.len());
+        fragments.parent.push(Some(from));
+        fragments.first.push(None);
+        Ok(())
+    }
+
+    /// Close the innermost branch: add its rotatable bond and torsion.
+    fn end_branch(
+        &mut self,
+        line: &str,
+        line_number: usize,
+        molecule: &mut Molecule,
+        fragments: &mut Fragments,
+    ) -> Result<(), IoError> {
+        branch_serials(line, line_number)?;
+        let (Some((from, to)), Some(moving)) = (self.open.pop(), self.moving.pop()) else {
+            return Err(IoError::Parse {
+                line: line_number,
+                message: format!("ENDBRANCH without a BRANCH: {line}"),
+            });
+        };
+        let fragment = self.fragment_stack.pop().unwrap_or(0);
+        let to = self.lookup(to, line, line_number)?;
+        fragments.first[fragment] = Some(to);
+
+        let bond_idx = molecule.bonds.len();
+        molecule.bonds.push(Bond {
+            atom1_idx: from,
+            atom2_idx: to,
+            rotatable: true,
+        });
+        if let Some(parent) = self.moving.last_mut() {
+            parent.extend_from_slice(&moving);
+        }
+        molecule.torsions.push(Torsion {
+            bond_idx,
+            moving_atoms: moving,
+            angle: 0.0,
+        });
+        Ok(())
+    }
+
+    fn lookup(&self, serial: u32, line: &str, line_number: usize) -> Result<usize, IoError> {
+        self.serials
+            .get(&serial)
+            .copied()
+            .ok_or_else(|| IoError::Parse {
+                line: line_number,
+                message: format!("atom {serial} of this branch has not been read: {line}"),
+            })
+    }
+}
+
+/// The two serial numbers of a BRANCH or ENDBRANCH record.
+fn branch_serials(line: &str, line_number: usize) -> Result<(u32, u32), IoError> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    let number = |s: &str| s.parse::<u32>().ok();
+    match parts.as_slice() {
+        [_, a, b] => number(a).zip(number(b)),
+        _ => None,
+    }
+    .ok_or_else(|| IoError::Parse {
+        line: line_number,
+        message: format!("Invalid branch record: {line}"),
+    })
 }
 
 /// Parse an atom record from a PDBQT file
@@ -281,27 +518,18 @@ fn parse_pdbqt_atom(line: &str, line_number: usize) -> Result<Atom, IoError> {
 
 /// Infer bonds from distances, as Vina's `model::assign_bonds` does.
 ///
-/// Two atoms can only bond if they cannot move relative to each other: they
-/// are in the same rigid fragment (`fragment_of`), or one is the atom the
-/// other's fragment hangs from (`fragment_parent`). This keeps an opened
+/// Two atoms can only bond if they cannot move relative to each other
+/// (`rigid`); in a ligand, they are in the same rigid fragment, or one is
+/// the atom the other's fragment hangs from. This keeps an opened
 /// macrocycle open, since Meeko puts each closure dummy right on top of a
 /// carbon in another fragment. They bond if closer than 1.1 times the sum
 /// of their covalent radii, unless a third such atom is closer to both of
 /// them than they are to each other. The bonds between fragments are the
 /// BRANCH bonds, which are already present.
-fn infer_bonds(molecule: &mut Molecule, fragment_of: &[usize], fragment_parent: &[Option<usize>]) {
+fn infer_bonds(molecule: &mut Molecule, rigid: impl Fn(usize, usize) -> bool) {
     const ALLOWANCE: f64 = 1.1;
     // The largest covalent radius; Vina looks this far for atoms in between.
     const MAX_COVALENT: f64 = 1.75;
-
-    let rigid = |a: usize, b: usize| match (fragment_of.get(a), fragment_of.get(b)) {
-        (Some(&fa), Some(&fb)) => {
-            fa == fb
-                || fragment_parent.get(fb) == Some(&Some(a))
-                || fragment_parent.get(fa) == Some(&Some(b))
-        }
-        _ => false,
-    };
 
     let mut existing: HashSet<(usize, usize)> = molecule
         .bonds
@@ -388,7 +616,8 @@ pub fn write_pdbqt<P: AsRef<Path>>(molecule: &Molecule, path: P) -> Result<(), I
 ///
 /// Each model carries Vina's score remarks (`VINA RESULT` with the affinity
 /// and RMSD from the best mode, then the inter/intra breakdown when the
-/// result has it) followed by the ligand's own records, so Vina, Meeko and
+/// result has it) followed by the ligand's own records and then any
+/// flexible side chains' (their `BEGIN_RES` blocks), so Vina, Meeko and
 /// rustdock all read it back.
 pub fn write_docking_results<P: AsRef<Path>>(
     results: &[crate::optimization::DockingResult],
@@ -427,6 +656,10 @@ pub fn write_docking_results<P: AsRef<Path>>(
             }
         }
         write_molecule_records(&mut file, &result.molecule)?;
+        // Vina writes the moved side chains after the ligand, in each model.
+        if let Some(flex) = &result.flex {
+            write_molecule_records(&mut file, flex)?;
+        }
         writeln!(file, "ENDMDL")?;
     }
 
@@ -531,6 +764,7 @@ mod tests {
         let result = |molecule: Molecule, energy: f64| crate::optimization::DockingResult {
             energy,
             molecule,
+            flex: None,
             energy_components: vec![
                 ("Intermolecular".to_string(), -9.0),
                 ("Intramolecular".to_string(), -0.5),
@@ -658,5 +892,171 @@ TORSDOF 0
         let atom = parse_pdbqt_atom(line, 1).unwrap();
         assert_eq!(atom.residue_num, -1);
         assert_eq!(atom.residue_name, "PHE");
+    }
+
+    /// Two residues as Meeko writes them, with the serials renumbered so
+    /// that BRANCH records cannot be read as file positions.
+    const FLEX: &str = "\
+BEGIN_RES TYR A 79
+REMARK INDEX MAP 3 1 15 2 18 3 19 4 20 5 22 6 23 7 26 8 28 9 29 10
+ROOT
+ATOM    101  CA  TYR A  79      25.291   6.625  63.328  1.00  0.00     0.175 C 
+ENDROOT
+BRANCH 101 102
+ATOM    102  CB  TYR A  79      25.190   5.178  62.860  1.00  0.00     0.070 C 
+BRANCH 102 103
+ATOM    103  CG  TYR A  79      25.993   4.196  63.686  1.00  0.00    -0.045 A 
+ATOM    104 CD1  TYR A  79      27.363   4.036  63.481  1.00  0.00     0.007 A 
+ATOM    105 CD2  TYR A  79      25.381   3.380  64.599  1.00  0.00     0.007 A 
+ATOM    106 CE1  TYR A  79      28.091   3.119  64.198  1.00  0.00     0.046 A 
+ATOM    107 CE2  TYR A  79      26.115   2.443  65.353  1.00  0.00     0.046 A 
+ATOM    108  CZ  TYR A  79      27.481   2.320  65.126  1.00  0.00     0.115 A 
+BRANCH 108 109
+ATOM    109  OH  TYR A  79      28.181   1.360  65.840  1.00  0.00    -0.507 OA
+ATOM    110  HH  TYR A  79      27.854   1.280  66.610  1.00  0.00     0.294 HD
+ENDBRANCH 108 109
+ENDBRANCH 102 103
+ENDBRANCH 101 102
+END_RES TYR A 79
+BEGIN_RES THR A 222
+ROOT
+ATOM      1  CA  THR A 222      27.454   3.284  54.504  1.00  0.00     0.199 C 
+ENDROOT
+BRANCH   1   2
+ATOM      2  CB  THR A 222      27.925   4.700  54.192  1.00  0.00     0.143 C 
+ATOM      3 CG2  THR A 222      26.927   5.445  53.297  1.00  0.00     0.041 C 
+BRANCH   2   4
+ATOM      4 OG1  THR A 222      28.069   5.456  55.404  1.00  0.00    -0.389 OA
+ATOM      5 HG1  THR A 222      28.805   5.278  55.768  1.00  0.00     0.211 HD
+ENDBRANCH   2   4
+ENDBRANCH   1   2
+END_RES THR A 222
+";
+
+    /// The backbone N of each residue, which stays in the rigid file.
+    const RIGID: &str = "\
+ATOM    694  N   TYR A  79      24.786   6.752  64.683  1.00  0.00    -0.343 N 
+ATOM   1954  N   THR A 222      28.499   2.529  55.204  1.00  0.00    -0.341 N 
+";
+
+    fn parse_flex_text(flex: &str) -> Result<FlexResidues, IoError> {
+        let dir = tempfile::tempdir().unwrap();
+        let (flex_path, rigid_path) = (
+            dir.path().join("flex.pdbqt"),
+            dir.path().join("rigid.pdbqt"),
+        );
+        std::fs::write(&flex_path, flex).unwrap();
+        std::fs::write(&rigid_path, RIGID).unwrap();
+        parse_flex_pdbqt(&flex_path, &parse_pdbqt(&rigid_path).unwrap())
+    }
+
+    /// Residues, torsions and the fixed atoms: each ROOT, and the first atom
+    /// of each branch off it, which lies on that branch's axis.
+    #[test]
+    fn test_flex_residues() {
+        let flex = parse_flex_text(FLEX).unwrap();
+        let names: Vec<&str> = flex
+            .molecule
+            .atoms
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(flex.num_residues(), 2);
+        assert_eq!(flex.residue_of.iter().filter(|&&r| r == 1).count(), 5);
+        assert_eq!(flex.molecule.torsions.len(), 5);
+        let fixed: Vec<&str> = (0..names.len())
+            .filter(|&i| flex.fixed[i])
+            .map(|i| names[i])
+            .collect();
+        assert_eq!(fixed, ["CA", "CB", "CA", "CB"]);
+        // THR's chi1 (CA-CB, found by serial within its residue) turns the
+        // atoms from CB on.
+        let chi1 = flex.molecule.torsions.last().unwrap();
+        let bond = &flex.molecule.bonds[chi1.bond_idx];
+        assert_eq!((bond.atom1_idx, bond.atom2_idx), (10, 11));
+        assert_eq!(chi1.moving_atoms, [11, 12, 13, 14]);
+        // Each CA is bonded to its residue's rigid N, so it is polar.
+        assert!(!flex.molecule.atoms[0].is_hydrophobic);
+        assert!(flex.molecule.atoms[1].is_hydrophobic);
+        assert!(flex.molecule.atoms[8].is_hbond_donor);
+        assert!(flex
+            .molecule
+            .bonds
+            .iter()
+            .all(|b| b.atom1_idx < 15 && b.atom2_idx < 15));
+    }
+
+    /// Vina's flex pairs: heavy atoms more than three bonds apart that can
+    /// move relative to each other. OH sits on the CZ-OH axis, so it is
+    /// rigid relative to CB and CG, the ends of the ring branch's axis, but
+    /// not to the CA.
+    #[test]
+    fn test_flex_internal_pairs() {
+        let flex = parse_flex_text(FLEX).unwrap();
+        let atoms = &flex.molecule.atoms;
+        let label = |i: usize| format!("{}{}", atoms[i].name, atoms[i].residue_num);
+        let within_tyr: Vec<String> = flex
+            .internal_pairs()
+            .into_iter()
+            .filter(|&(i, j)| flex.residue_of[i] == 0 && flex.residue_of[j] == 0)
+            .map(|(i, j)| format!("{}-{}", label(i), label(j)))
+            .collect();
+        assert_eq!(
+            within_tyr,
+            ["CA79-CE179", "CA79-CE279", "CA79-CZ79", "CA79-OH79"]
+        );
+        // Between residues, every heavy pair but the fixed ones.
+        let between = flex
+            .internal_pairs()
+            .into_iter()
+            .filter(|&(i, j)| flex.residue_of[i] != flex.residue_of[j])
+            .count();
+        let heavy = |r: usize| {
+            (0..atoms.len())
+                .filter(|&i| flex.residue_of[i] == r && !atoms[i].atom_type.is_hydrogen())
+                .count()
+        };
+        assert_eq!(between, heavy(0) * heavy(1) - 4);
+    }
+
+    #[test]
+    fn test_flex_errors() {
+        let outside =
+            "ATOM      1  CA  THR A 222      27.454   3.284  54.504  1.00  0.00     0.199 C \n";
+        assert!(parse_flex_text(outside).is_err());
+        let unclosed = FLEX.replace("END_RES THR A 222\n", "");
+        assert!(parse_flex_text(&unclosed).is_err());
+        let bad_branch = FLEX.replace("BRANCH   2   4", "BRANCH  99   4");
+        assert!(parse_flex_text(&bad_branch).is_err());
+    }
+
+    /// Docking output with flexible side chains writes each model's moved
+    /// residues after the ligand, and reads back as the ligand alone.
+    #[test]
+    fn test_docking_results_with_flex_read_back() {
+        let ligand = parse_pdbqt(fixture("ligand_meeko.pdbqt")).unwrap();
+        let mut flex = parse_flex_text(FLEX).unwrap();
+        flex.molecule.atoms[5].coordinates.x += 1.0;
+        let result = crate::optimization::DockingResult {
+            energy: -7.0,
+            molecule: ligand.clone(),
+            flex: Some(flex.molecule.clone()),
+            energy_components: Vec::new(),
+            rmsd: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("docked.pdbqt");
+        write_docking_results(&[result.clone(), result], &out).unwrap();
+
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(text.matches("BEGIN_RES TYR A 79").count(), 2);
+        let model = text.split("ENDMDL").next().unwrap();
+        let begin = model.find("BEGIN_RES").unwrap();
+        assert!(model[..begin].contains("TORSDOF"));
+        assert!(model.contains("ATOM    106 CE1  TYR A  79      29.091"));
+
+        let back = parse_pdbqt(&out).unwrap();
+        assert_eq!(back.atoms.len(), ligand.atoms.len());
+        assert_eq!(back.pdbqt_records, ligand.pdbqt_records);
     }
 }
