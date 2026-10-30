@@ -36,8 +36,8 @@ pub struct MonteCarloParams {
     pub hunt_cap: f64,
 
     /// The same cap on each ligand atom's energy against the receptor
-    /// (Vina's `hunt_cap[1]`: 1.5), letting the search pass through the
-    /// receptor more easily than through itself.
+    /// (Vina's `hunt_cap[1]`: 10). Vina's `monte_carlo` defaults it to 1.5,
+    /// but `Vina::global_search` sets all three caps to 10 before docking.
     pub hunt_cap_receptor: f64,
 
     /// Minimum heavy-atom RMSD between reported modes, in Angstroms
@@ -78,7 +78,7 @@ impl Default for MonteCarloParams {
             temperature: 1.2,
             mutation_amplitude: 2.0,
             hunt_cap: 10.0,
-            hunt_cap_receptor: 1.5,
+            hunt_cap_receptor: 10.0,
             min_rmsd: 1.0,
             local_steps: None,
             randomize_initial_pose: true,
