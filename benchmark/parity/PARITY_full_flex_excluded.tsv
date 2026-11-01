@@ -1,0 +1,51 @@
+1bcu	flex preparation: Meeko failed: RuntimeError: flexible residue H:220 has 0 rotatable bonds from root, but PDBQT is limited to 1
+1e66	flex preparation: Meeko failed: rdkit.Chem.rdchem.AtomValenceException: Explicit valence for atom # 8 N, 5, is greater than permitted
+1gpk	flex preparation: Meeko failed: 2. (to skip the residues) Use --delete_residues to ignore them. Residues will be deleted from the prepared receptor.
+1gpn	flex preparation: Meeko failed: 2. (to skip the residues) Use --delete_residues to ignore them. Residues will be deleted from the prepared receptor.
+1h22	flex preparation: Meeko failed: 2. (to skip the residues) Use --delete_residues to ignore them. Residues will be deleted from the prepared receptor.
+1h23	flex preparation: Meeko failed: 2. (to skip the residues) Use --delete_residues to ignore them. Residues will be deleted from the prepared receptor.
+1o5b	flex preparation: Meeko failed: Use --wanted_altloc to set variants for specific residues.
+1oyt	flex preparation: Meeko failed: RuntimeError: Element Na doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+2brb	flex preparation: Meeko failed: rdkit.Chem.rdchem.AtomValenceException: Explicit valence for atom # 1 C, 5, is greater than permitted
+2j7h	flex preparation: Meeko failed: rdkit.Chem.rdchem.AtomValenceException: Explicit valence for atom # 4 C, 5, is greater than permitted
+2r9w	flex preparation: Meeko failed: - Template matching failed for: ['B:87', 'B:92'] Ignored due to allow_bad_res.
+2vvn	flex preparation: Meeko failed: IndexError: tuple index out of range
+2w66	flex preparation: Meeko failed: rdkit.Chem.rdchem.AtomValenceException: Explicit valence for atom # 5 C, 5, is greater than permitted
+2wn9	flex preparation: Meeko failed: 2. (to skip the residues) Use --delete_residues to ignore them. Residues will be deleted from the prepared receptor.
+2wnc	flex preparation: Meeko failed: RuntimeError: flexible residue A:190 has 0 rotatable bonds from root, but PDBQT is limited to 1
+2xbv	flex preparation: Meeko failed: RuntimeError: Element Na doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+2y5h	flex preparation: Meeko failed: RuntimeError: Element Na doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+2zda	flex preparation: Meeko failed: RuntimeError: Element Na doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+3ao4	flex preparation: Meeko failed: RuntimeError: Element Cd doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+3bv9	flex preparation: Meeko failed: RuntimeError: Element Na doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+3cj4	flex preparation: Meeko failed: RuntimeError: Element Ni doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+3dx1	flex preparation: Meeko failed: 2. (to skip the residues) Use --delete_residues to ignore them. Residues will be deleted from the prepared receptor.
+3e5a	flex preparation: Meeko failed: rdkit.Chem.rdchem.AtomValenceException: Explicit valence for atom # 5 O, 3, is greater than permitted
+3ejr	flex preparation: Meeko failed: 2. (to skip the residues) Use --delete_residues to ignore them. Residues will be deleted from the prepared receptor.
+3f3a	flex preparation: Meeko failed: RuntimeError: Element Na doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+3f3c	flex preparation: Meeko failed: RuntimeError: Element Na doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+3f3d	flex preparation: Meeko failed: RuntimeError: Element Na doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+3f3e	flex preparation: Meeko failed: RuntimeError: Element Na doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+3k5v	flex preparation: Meeko failed: IndexError: tuple index out of range
+3kwa	flex preparation: Meeko failed: RuntimeError: Element Hg doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+3pyy	flex preparation: Meeko failed: rdkit.Chem.rdchem.AtomValenceException: Explicit valence for atom # 5 O, 3, is greater than permitted
+3u8k	flex preparation: Meeko failed: 2. (to skip the residues) Use --delete_residues to ignore them. Residues will be deleted from the prepared receptor.
+3uri	flex preparation: Meeko failed: 2. (to skip the residues) Use --delete_residues to ignore them. Residues will be deleted from the prepared receptor.
+3utu	flex preparation: Meeko failed: rdkit.Chem.rdchem.AtomValenceException: Explicit valence for atom # 4 C, 5, is greater than permitted
+3wtj	flex preparation: Meeko failed: RuntimeError: flexible residue A:187 has 0 rotatable bonds from root, but PDBQT is limited to 1
+3zso	flex preparation: Meeko failed: RuntimeError: Element Na doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+4abg	flex preparation: Meeko failed: Use --wanted_altloc to set variants for specific residues.
+4bkt	flex preparation: Meeko failed: RuntimeError: Element As doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+4ciw	flex preparation: Meeko failed: RuntimeError: Element Na doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+4cr9	flex preparation: Meeko failed: RuntimeError: flexible residue A:219 has 0 rotatable bonds from root, but PDBQT is limited to 1
+4crc	flex preparation: Meeko failed: RuntimeError: flexible residue A:219 has 0 rotatable bonds from root, but PDBQT is limited to 1
+4de1	flex preparation: Meeko failed: 2. (to skip the residues) Use --delete_residues to ignore them. Residues will be deleted from the prepared receptor.
+4llx	flex preparation: Meeko failed: RuntimeError: Element Ni doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+4mme	flex preparation: Meeko failed: RuntimeError: Element Na doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+4qac	flex preparation: Meeko failed: 2. (to skip the residues) Use --delete_residues to ignore them. Residues will be deleted from the prepared receptor.
+4twp	flex preparation: Meeko failed: RuntimeError: Element Ni doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+4w9c	flex preparation: Meeko failed: RuntimeError: Element As doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+4w9h	flex preparation: Meeko failed: RuntimeError: Element As doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+4w9i	flex preparation: Meeko failed: RuntimeError: Element As doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+4w9l	flex preparation: Meeko failed: RuntimeError: Element As doesn't have an implemented covalent radius, which was required for the perception of intermolecular bonds.
+4x6p	flex preparation: Meeko failed: 2. (to skip the residues) Use --delete_residues to ignore them. Residues will be deleted from the prepared receptor.

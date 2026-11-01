@@ -73,6 +73,38 @@ With `--jobs`, choose the slots so that no two jobs share a physical core;
 otherwise wall times are inflated. On a 64-core machine with 2-way SMT, use
 `--jobs 4 --cpu 16`.
 
+### Flexible side chains
+
+`--flex` docks with flexible side chains (work directory `work-flex/`, or
+`work-posebusters-flex/`). For each complex, up to three residues whose side
+chains have a heavy atom within 4 Å of the crystal ligand are made flexible
+with Meeko's `mk_prepare_receptor.py --flexres` from `protein_dry.pdb`, as
+`flex_rigid.pdbqt` and `flex.pdbqt` (cached with the residues and box in
+`flex.json`). The box covers the crystal ligand and the side chains plus 10 Å.
+Both programs dock with `--flex`; their full output is kept as
+`*_flexout.pdbqt`, and the ligand alone as `*_out.pdbqt` for the RMSD and
+PoseBusters checks. Crystal-pose rescoring and Vina's rescoring of rustdock's
+top pose are skipped; `tests/parity.rs` checks flex scoring.
+
+Complexes Meeko cannot prepare (ions and metals without a covalent radius in
+Meeko, RDKit valence errors) are left out for both programs and listed in
+`flex_excluded.tsv`. Copying the inputs of a rigid run first keeps the
+ligands identical:
+
+```bash
+for d in benchmark/parity/work/*/; do
+  c=$(basename $d); mkdir -p benchmark/parity/work-flex/$c
+  cp $d/{prep.json,receptor.pdbqt,ligand_start.pdbqt,ligand_xtal.pdbqt,ligand_xtal.sdf,protein_dry.pdb} \
+     benchmark/parity/work-flex/$c/
+done
+benchmark/parity/.venv/bin/python benchmark/parity/parity.py run --flex \
+    --pdbbind /path/to/PDBbind --subset full --seeds 42 1 2 3 4 --jobs 4 --cpu 16 \
+    --report benchmark/parity/PARITY_full_flex.md
+```
+
+The CASF-2016 reports are `PARITY_full_flex.md` and `PARITY_full_flex_seeds.md`,
+with the left-out complexes in `PARITY_full_flex_excluded.tsv`.
+
 ## Protocol
 
 | Step | How |
