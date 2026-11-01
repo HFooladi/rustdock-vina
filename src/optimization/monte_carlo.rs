@@ -9,12 +9,13 @@ use rand::prelude::*;
 
 use crate::forcefield::ForceField;
 use crate::grid::{pairwise_energy_and_gradient, GridSet, ReceptorGrids};
-use crate::molecule::Molecule;
+use crate::molecule::{FlexResidues, Molecule};
 use crate::optimization::vina_search::{
     vina_global_steps, vina_local_steps, Caps, ExactField, GridField, InterField, SearchBox,
     SearchSettings, Searcher,
 };
 use crate::optimization::{DockingResult, OptimizationError, Optimizer};
+use crate::scoring::score_pose_with_flex;
 
 /// Parameters for the Monte Carlo search. Defaults are Vina's.
 #[derive(Debug, Clone)]
@@ -109,7 +110,7 @@ impl MonteCarlo {
     /// Vina's Monte Carlo step count per chain for `ligand`:
     /// `70 * 3 * (50 + atoms + 10 * (6 + torsions)) / 2`.
     pub fn default_steps(ligand: &Molecule) -> usize {
-        vina_global_steps(ligand)
+        vina_global_steps(ligand.atoms.len(), ligand.torsions.len())
     }
 
     /// The receptor and search box for docking with these parameters, with
@@ -135,10 +136,27 @@ impl MonteCarlo {
         };
         Ok(Target {
             receptor,
+            flex: None,
             center,
             box_size,
             grids,
         })
+    }
+
+    /// As [`target`](Self::target), with flexible side chains that every
+    /// ligand docked into it moves along with itself. `receptor` is the
+    /// rigid part, which must leave the side chains out.
+    pub fn target_with_flex(
+        &self,
+        receptor: Molecule,
+        flex: FlexResidues,
+        forcefield: &dyn ForceField,
+        center: Vector3<f64>,
+        box_size: Vector3<f64>,
+    ) -> Result<Target, OptimizationError> {
+        let mut target = self.target(receptor, forcefield, center, box_size)?;
+        target.flex = Some(flex);
+        Ok(target)
     }
 
     /// Dock `ligand` into `target`, which must have been made by
@@ -159,8 +177,14 @@ impl MonteCarlo {
         // pose inside it, so drop them once.
         let pruned = prune_receptor(&target.receptor, &center, &box_size, ligand);
         let search_box = SearchBox::new(&center, &box_size, self.params.grid_spacing);
+        let flex = target.flex.as_ref();
+        let searcher = Searcher::new(ligand, flex, forcefield, search_box)?;
         let grids = match &target.grids {
-            Some(grids) => Some(grids.grid_set(ligand, forcefield)?),
+            Some(grids) => {
+                let mut movable = Molecule::new("movable");
+                movable.atoms = searcher.movable_atoms().to_vec();
+                Some(grids.grid_set(&movable, forcefield)?)
+            }
             None => None,
         };
         let exact = ExactField::new(&pruned, forcefield, search_box);
@@ -170,18 +194,19 @@ impl MonteCarlo {
             None => &exact,
         };
 
-        let searcher = Searcher::new(ligand, forcefield, search_box)?;
+        let movable = searcher.model.n_movable();
+        let torsions = searcher.model.n_torsions() + searcher.model.n_flex_torsions();
         let settings = SearchSettings {
             chains: self.params.exhaustiveness.max(1),
             global_steps: if steps == 0 {
-                vina_global_steps(ligand)
+                vina_global_steps(movable, torsions)
             } else {
                 steps
             },
             local_steps: self
                 .params
                 .local_steps
-                .unwrap_or_else(|| vina_local_steps(ligand)),
+                .unwrap_or_else(|| vina_local_steps(movable)),
             num_saved: num_modes.max(1),
             min_rmsd: self.params.min_rmsd,
             temperature: self.params.temperature,
@@ -200,18 +225,28 @@ impl MonteCarlo {
         // As Vina reports a mode: its intermolecular energy plus its internal
         // energy relative to the best mode's, which stands in for the
         // unbound ligand. The best mode's value is therefore its
-        // intermolecular energy alone.
+        // intermolecular energy alone. With flexible side chains, their
+        // energy with the ligand is intermolecular, and their energy with
+        // the rigid receptor and with each other is internal.
         let mut results = Vec::with_capacity(poses.len());
         let mut best_intra = None;
         for pose in &poses {
             let coords = searcher.coords_of(&pose.conf);
             let molecule = searcher.model.to_molecule(ligand, &pose.conf, &coords);
-            let inter = intermolecular_energy(&molecule, &pruned, forcefield)?;
-            let intra = searcher.intra_energy(&coords)?;
+            let mut inter = intermolecular_energy(&molecule, &pruned, forcefield)?;
+            let mut intra = searcher.intra_energy(&coords)?;
+            let moved = flex.map(|f| searcher.model.to_flex(f, &pose.conf, &coords));
+            if let Some(moved) = &moved {
+                let score = score_pose_with_flex(&molecule, &pruned, Some(moved), forcefield)
+                    .map_err(|e| OptimizationError::Unknown(e.to_string()))?;
+                inter += score.ligand_flex;
+                intra += score.flex_receptor + score.flex_flex;
+            }
             let reference = *best_intra.get_or_insert(intra);
             results.push(DockingResult {
                 energy: inter + intra - reference,
                 molecule,
+                flex: moved.map(|f| f.molecule),
                 energy_components: vec![
                     ("Intermolecular".to_string(), inter),
                     ("Intramolecular".to_string(), intra),
@@ -238,15 +273,22 @@ impl MonteCarlo {
 #[derive(Debug)]
 pub struct Target {
     receptor: Molecule,
+    flex: Option<FlexResidues>,
     center: Vector3<f64>,
     box_size: Vector3<f64>,
     grids: Option<ReceptorGrids>,
 }
 
 impl Target {
-    /// The receptor.
+    /// The receptor, or its rigid part when there are flexible side
+    /// chains.
     pub fn receptor(&self) -> &Molecule {
         &self.receptor
+    }
+
+    /// The flexible side chains, in their input conformation.
+    pub fn flex(&self) -> Option<&FlexResidues> {
+        self.flex.as_ref()
     }
 }
 

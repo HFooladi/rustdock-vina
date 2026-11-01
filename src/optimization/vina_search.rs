@@ -4,15 +4,16 @@
 //!
 //! | Here | Vina |
 //! |---|---|
-//! | [`Conf`], [`LigandModel`] | `conf.h`, `model::set` |
+//! | [`Conf`], [`Model`] | `conf.h`, `model::set` |
 //! | [`Searcher::bfgs`] | `bfgs.h`, `quasi_newton.cpp` |
 //! | [`Searcher::mutate`] | `mutate.cpp` |
 //! | [`Searcher::chain`] | `monte_carlo.cpp` |
 //! | [`add_to_container`] | `coords.cpp` |
 //! | [`Searcher::search`] | `parallel_mc.cpp`, `Vina::global_search` |
 //!
-//! Poses are evaluated on a coordinate-only model of the ligand, so a trial
-//! pose costs a pass over a coordinate array rather than a `Molecule` clone.
+//! Poses are evaluated on a coordinate-only model of the ligand and any
+//! flexible side chains, so a trial pose costs a pass over a coordinate
+//! array rather than a `Molecule` clone.
 
 use std::collections::HashMap;
 use std::f64::consts::PI;
@@ -25,7 +26,7 @@ use rayon::prelude::*;
 use crate::atom::Atom;
 use crate::forcefield::ForceField;
 use crate::grid::{curl, GridSet};
-use crate::molecule::Molecule;
+use crate::molecule::{FlexResidues, Molecule};
 use crate::optimization::OptimizationError;
 
 /// Out-of-box penalty per Angstrom during the search (Vina's `slope`).
@@ -36,8 +37,9 @@ pub(crate) const SLOPE: f64 = 1e6;
 pub(crate) const AUTHENTIC_CAP: f64 = 1000.0;
 
 /// Curl caps for the two halves of the search energy (Vina's `v`): the
-/// ligand-receptor energy (`v[1]`) and the ligand's own pairs, intra and
-/// glue (`v[0]`, `v[2]`).
+/// energy of every moving atom against the rigid receptor (`v[1]`), and the
+/// pairs among moving atoms: the ligand's own, glue, ligand-flex and
+/// flex-flex (`v[0]`, `v[2]`).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Caps {
     pub(crate) receptor: f64,
@@ -106,36 +108,45 @@ impl SearchBox {
     }
 }
 
-/// A ligand pose: rigid placement plus torsion angles.
+/// A pose: the ligand's rigid placement and torsion angles, and the flexible
+/// side chains' torsion angles.
 ///
-/// Coordinates are `pivot + position + R(orientation) (p(torsions) - pivot)`,
-/// where `p` applies the torsion angles to the input coordinates and `pivot`
-/// is the input centroid; the identity [`Conf`] reproduces the input pose.
+/// Ligand coordinates are `pivot + position + R(orientation) (p(torsions) -
+/// pivot)`, where `p` applies the torsion angles to the input coordinates
+/// and `pivot` is the input centroid. Side chains only turn about their
+/// torsions. The identity [`Conf`] reproduces the input pose.
 #[derive(Debug, Clone)]
 pub(crate) struct Conf {
     position: Vector3<f64>,
     orientation: UnitQuaternion<f64>,
     torsions: Vec<f64>,
+    flex: Vec<f64>,
 }
 
 impl Conf {
-    fn identity(n_torsions: usize) -> Self {
+    fn identity(n_torsions: usize, n_flex: usize) -> Self {
         Self {
             position: Vector3::zeros(),
             orientation: UnitQuaternion::identity(),
             torsions: vec![0.0; n_torsions],
+            flex: vec![0.0; n_flex],
         }
     }
 
     /// Step along `change` scaled by `factor` (Vina's `conf::increment`).
-    /// Rotation is a rotation vector applied on the left, so the orientation
-    /// component of the gradient is the torque.
+    /// The layout is Vina's: position, rotation, ligand torsions, then flex
+    /// torsions. Rotation is a rotation vector applied on the left, so the
+    /// orientation component of the gradient is the torque.
     fn increment(&mut self, change: &DVector<f64>, factor: f64) {
         self.position += factor * Vector3::new(change[0], change[1], change[2]);
         let rotation = factor * Vector3::new(change[3], change[4], change[5]);
         self.orientation = UnitQuaternion::from_scaled_axis(rotation) * self.orientation;
+        let n = self.torsions.len();
         for (k, t) in self.torsions.iter_mut().enumerate() {
             *t = normalized_angle(*t + factor * change[6 + k]);
+        }
+        for (k, t) in self.flex.iter_mut().enumerate() {
+            *t = normalized_angle(*t + factor * change[6 + n + k]);
         }
     }
 }
@@ -147,53 +158,170 @@ struct TorsionAxis {
     moving: Vec<usize>,
 }
 
-/// A coordinate-only ligand: what the search needs to turn a [`Conf`] into
-/// coordinates and score them.
-pub(crate) struct LigandModel<'a> {
-    pub(crate) atoms: &'a [Atom],
+impl TorsionAxis {
+    /// The axis of `molecule`'s torsion `t`, with atom indices passed
+    /// through `index`; `None` if it names an atom that does not exist.
+    fn of(molecule: &Molecule, t: &crate::molecule::Torsion, index: &[usize]) -> Option<Self> {
+        let bond = molecule.bonds.get(t.bond_idx)?;
+        let at = |i: usize| index.get(i).copied();
+        Some(Self {
+            a: at(bond.atom1_idx)?,
+            b: at(bond.atom2_idx)?,
+            moving: t
+                .moving_atoms
+                .iter()
+                .map(|&i| at(i))
+                .collect::<Option<_>>()?,
+        })
+    }
+
+    /// Turn `out` by `angle` about this axis.
+    fn apply(&self, angle: f64, out: &mut [Vector3<f64>]) {
+        if angle == 0.0 {
+            return;
+        }
+        let origin = out[self.a];
+        let direction = out[self.b] - origin;
+        if direction.norm_squared() < 1e-20 {
+            return;
+        }
+        let rotation = Rotation3::from_axis_angle(&Unit::new_normalize(direction), angle);
+        for &i in &self.moving {
+            out[i] = rotation * (out[i] - origin) + origin;
+        }
+    }
+
+    /// The derivative of the energy with respect to this torsion: the
+    /// torque of the moving atoms' gradients about the axis.
+    fn derivative(&self, coords: &[Vector3<f64>], grads: &[Vector3<f64>]) -> f64 {
+        let origin = coords[self.a];
+        let direction = coords[self.b] - origin;
+        if direction.norm_squared() < 1e-20 {
+            return 0.0;
+        }
+        let u = direction.normalize();
+        self.moving
+            .iter()
+            .map(|&i| grads[i].dot(&u.cross(&(coords[i] - origin))))
+            .sum()
+    }
+}
+
+/// A coordinate-only model of what the search moves: the ligand and any
+/// flexible side chains, enough to turn a [`Conf`] into coordinates and
+/// score them.
+///
+/// Atoms are laid out as in Vina's `model`: the ligand's, then the side
+/// chains' moving atoms, then their fixed atoms. Every atom before
+/// `n_movable` is scored against the rigid receptor.
+pub(crate) struct Model {
+    pub(crate) atoms: Vec<Atom>,
+    n_ligand: usize,
+    n_movable: usize,
     base: Vec<Vector3<f64>>,
     pivot: Vector3<f64>,
     torsions: Vec<TorsionAxis>,
+    flex_torsions: Vec<TorsionAxis>,
+    /// The ligand's heavy atoms.
     heavy: Vec<usize>,
+    /// Every moving heavy atom, the ligand's and the side chains'.
+    movable_heavy: Vec<usize>,
     pairs: Vec<(usize, usize)>,
     /// Closure dummy - closure carbon pairs of an opened macrocycle.
     glue: Vec<(usize, usize)>,
+    /// Ligand-flex and flex-flex pairs (Vina's `inter_pairs` and
+    /// `other_pairs`).
+    flex_pairs: Vec<(usize, usize)>,
+    /// For each flex atom, from `n_ligand` on, its index in the flex
+    /// residues.
+    flex_source: Vec<usize>,
 }
 
-impl<'a> LigandModel<'a> {
-    pub(crate) fn new(ligand: &'a Molecule) -> Self {
-        let base: Vec<_> = ligand.atoms.iter().map(|a| a.coordinates).collect();
-        let pivot = ligand.center().unwrap_or_else(|_| Vector3::zeros());
-        let n = base.len();
+impl Model {
+    pub(crate) fn new(ligand: &Molecule, flex: Option<&FlexResidues>) -> Self {
+        let n_ligand = ligand.atoms.len();
+        let ligand_index: Vec<usize> = (0..n_ligand).collect();
         let torsions = ligand
             .torsions
             .iter()
-            .filter_map(|t| {
-                let bond = ligand.bonds.get(t.bond_idx)?;
-                let (a, b) = (bond.atom1_idx, bond.atom2_idx);
-                (a < n && b < n && t.moving_atoms.iter().all(|&i| i < n)).then(|| TorsionAxis {
-                    a,
-                    b,
-                    moving: t.moving_atoms.clone(),
-                })
-            })
+            .filter_map(|t| TorsionAxis::of(ligand, t, &ligand_index))
             .collect();
-        let heavy = (0..n)
-            .filter(|&i| !ligand.atoms[i].atom_type.is_hydrogen())
+        let pivot = ligand.center().unwrap_or_else(|_| Vector3::zeros());
+        let mut atoms = ligand.atoms.clone();
+
+        // Flex atoms, moving ones first.
+        let mut flex_source = Vec::new();
+        let mut flex_torsions = Vec::new();
+        let mut flex_pairs = Vec::new();
+        if let Some(flex) = flex {
+            flex_source.extend(flex.movable());
+            flex_source.extend((0..flex.fixed.len()).filter(|&i| flex.fixed[i]));
+            let mut index = vec![0; flex_source.len()];
+            for (k, &i) in flex_source.iter().enumerate() {
+                index[i] = n_ligand + k;
+                atoms.push(flex.molecule.atoms[i].clone());
+            }
+            flex_torsions = flex
+                .molecule
+                .torsions
+                .iter()
+                .filter_map(|t| TorsionAxis::of(&flex.molecule, t, &index))
+                .collect();
+            flex_pairs = flex
+                .internal_pairs()
+                .into_iter()
+                .map(|(i, j)| (index[i], index[j]))
+                .collect();
+            // Every ligand atom against every moving flex atom, but for
+            // hydrogens and closure dummies, as Vina's `model::append`.
+            let scored = |a: &Atom| !a.atom_type.is_hydrogen() && !a.atom_type.is_closure_dummy();
+            for i in flex.movable() {
+                for j in 0..n_ligand {
+                    if scored(&flex.molecule.atoms[i]) && scored(&ligand.atoms[j]) {
+                        flex_pairs.push((j, index[i]));
+                    }
+                }
+            }
+        }
+        let n_movable = n_ligand + flex.map_or(0, |f| f.movable().count());
+        let heavy = (0..n_ligand)
+            .filter(|&i| !atoms[i].atom_type.is_hydrogen())
+            .collect();
+        let movable_heavy = (0..n_movable)
+            .filter(|&i| !atoms[i].atom_type.is_hydrogen())
             .collect();
         Self {
-            atoms: &ligand.atoms,
-            base,
+            base: atoms.iter().map(|a| a.coordinates).collect(),
+            atoms,
+            n_ligand,
+            n_movable,
             pivot,
             torsions,
+            flex_torsions,
             heavy,
+            movable_heavy,
             pairs: ligand.intramolecular_pairs(),
             glue: ligand.glue_pairs(),
+            flex_pairs,
+            flex_source,
         }
     }
 
     pub(crate) fn n_torsions(&self) -> usize {
         self.torsions.len()
+    }
+
+    pub(crate) fn n_flex_torsions(&self) -> usize {
+        self.flex_torsions.len()
+    }
+
+    /// Number of atoms the search moves, Vina's `num_movable_atoms`.
+    pub(crate) fn n_movable(&self) -> usize {
+        self.n_movable
+    }
+
+    fn identity(&self) -> Conf {
+        Conf::identity(self.n_torsions(), self.n_flex_torsions())
     }
 
     /// Write the coordinates of `conf` into `out`.
@@ -202,40 +330,33 @@ impl<'a> LigandModel<'a> {
         // Torsion moving sets are nested or disjoint, so applying each about
         // its current axis gives the same pose in any order.
         for (axis, &angle) in self.torsions.iter().zip(&conf.torsions) {
-            if angle == 0.0 {
-                continue;
-            }
-            let origin = out[axis.a];
-            let direction = out[axis.b] - origin;
-            if direction.norm_squared() < 1e-20 {
-                continue;
-            }
-            let rotation = Rotation3::from_axis_angle(&Unit::new_normalize(direction), angle);
-            for &i in &axis.moving {
-                out[i] = rotation * (out[i] - origin) + origin;
-            }
+            axis.apply(angle, out);
         }
         let rotation = conf.orientation.to_rotation_matrix();
         let center = self.pivot + conf.position;
-        for p in out.iter_mut() {
+        for p in &mut out[..self.n_ligand] {
             *p = rotation * (*p - self.pivot) + center;
+        }
+        for (axis, &angle) in self.flex_torsions.iter().zip(&conf.flex) {
+            axis.apply(angle, out);
         }
     }
 
     /// Chain rule from per-atom gradients at `coords` (the coordinates of
-    /// `conf`) to the [`Conf`] tangent space: force, torque about the
-    /// rotation centre, and one torque projection per torsion.
+    /// `conf`) to the [`Conf`] tangent space: force and torque on the ligand
+    /// about its rotation centre, then one torque projection per torsion.
     fn conf_gradient(
         &self,
         conf: &Conf,
         coords: &[Vector3<f64>],
         grads: &[Vector3<f64>],
     ) -> DVector<f64> {
-        let mut g = DVector::zeros(6 + self.torsions.len());
+        let n = self.torsions.len();
+        let mut g = DVector::zeros(6 + n + self.flex_torsions.len());
         let center = self.pivot + conf.position;
         let mut force = Vector3::zeros();
         let mut torque = Vector3::zeros();
-        for (p, d) in coords.iter().zip(grads) {
+        for (p, d) in coords.iter().zip(grads).take(self.n_ligand) {
             force += d;
             torque += (p - center).cross(d);
         }
@@ -244,22 +365,15 @@ impl<'a> LigandModel<'a> {
             g[3 + k] = torque[k];
         }
         for (k, axis) in self.torsions.iter().enumerate() {
-            let origin = coords[axis.a];
-            let direction = coords[axis.b] - origin;
-            if direction.norm_squared() < 1e-20 {
-                continue;
-            }
-            let u = direction.normalize();
-            g[6 + k] = axis
-                .moving
-                .iter()
-                .map(|&i| grads[i].dot(&u.cross(&(coords[i] - origin))))
-                .sum();
+            g[6 + k] = axis.derivative(coords, grads);
+        }
+        for (k, axis) in self.flex_torsions.iter().enumerate() {
+            g[6 + n + k] = axis.derivative(coords, grads);
         }
         g
     }
 
-    /// Root-mean-square distance of heavy atoms from `center`
+    /// Root-mean-square distance of the ligand's heavy atoms from `center`
     /// (Vina's `gyration_radius`).
     fn gyration_radius(&self, coords: &[Vector3<f64>], center: &Vector3<f64>) -> f64 {
         if self.heavy.is_empty() {
@@ -289,6 +403,23 @@ impl<'a> LigandModel<'a> {
         }
         molecule
     }
+
+    /// The flexible side chains with their atoms moved to `coords`.
+    pub(crate) fn to_flex(
+        &self,
+        template: &FlexResidues,
+        conf: &Conf,
+        coords: &[Vector3<f64>],
+    ) -> FlexResidues {
+        let mut flex = template.clone();
+        for (&i, p) in self.flex_source.iter().zip(&coords[self.n_ligand..]) {
+            flex.molecule.atoms[i].coordinates = *p;
+        }
+        for (torsion, angle) in flex.molecule.torsions.iter_mut().zip(&conf.flex) {
+            torsion.angle = normalized_angle(torsion.angle + angle);
+        }
+        flex
+    }
 }
 
 /// Intramolecular pair energies tabulated against squared distance, one
@@ -299,7 +430,7 @@ impl<'a> LigandModel<'a> {
 /// [`grid_cutoff`](ForceField::grid_cutoff)).
 struct PairTables {
     tables: Vec<Vec<f64>>,
-    /// Table index for each of [`LigandModel::pairs`].
+    /// Table index for each pair it was built for.
     pair_table: Vec<usize>,
     cutoff2: f64,
 }
@@ -360,10 +491,10 @@ impl PairTables {
     }
 }
 
-/// Ligand-receptor energy as the search sees it.
+/// Energy against the rigid receptor as the search sees it.
 pub(crate) trait InterField: Sync {
-    /// Energy of ligand atoms at `coords`, adding each atom's gradient into
-    /// `grads`. Atoms outside the box cost `slope` per Angstrom; `cap`
+    /// Energy of the moving atoms at `coords`, adding each atom's gradient
+    /// into `grads`. Atoms outside the box cost `slope` per Angstrom; `cap`
     /// softens each atom's positive energy.
     fn eval(
         &self,
@@ -392,7 +523,7 @@ impl InterField for GridField<'_> {
 }
 
 /// Exact pairwise energy against the receptor (Vina's `non_cache`): each
-/// ligand atom is clamped into the box, summed over receptor atoms within
+/// moving atom is clamped into the box, summed over receptor atoms within
 /// the cutoff, curled, then charged the out-of-box penalty.
 pub(crate) struct ExactField<'a> {
     receptor: Vec<&'a Atom>,
@@ -506,16 +637,17 @@ pub(crate) struct SearchSettings {
 }
 
 /// Vina's Monte Carlo step count per chain:
-/// `70 * 3 * (50 + atoms + 10 * dof) / 2`.
-pub(crate) fn vina_global_steps(ligand: &Molecule) -> usize {
-    let dof = 6 + ligand.torsions.len();
-    let heuristic = ligand.atoms.len() + 10 * dof;
+/// `70 * 3 * (50 + atoms + 10 * dof) / 2`, over the moving atoms and the
+/// degrees of freedom (6 + torsions, the side chains' included).
+pub(crate) fn vina_global_steps(movable_atoms: usize, torsions: usize) -> usize {
+    let dof = 6 + torsions;
+    let heuristic = movable_atoms + 10 * dof;
     70 * 3 * (50 + heuristic) / 2
 }
 
-/// Vina's BFGS step count: `(25 + atoms) / 3`.
-pub(crate) fn vina_local_steps(ligand: &Molecule) -> usize {
-    (25 + ligand.atoms.len()) / 3
+/// Vina's BFGS step count: `(25 + moving atoms) / 3`.
+pub(crate) fn vina_local_steps(movable_atoms: usize) -> usize {
+    (25 + movable_atoms) / 3
 }
 
 /// A pose found by the search.
@@ -534,33 +666,33 @@ struct Scratch {
 
 /// The search over one ligand in one box.
 pub(crate) struct Searcher<'a> {
-    pub(crate) model: LigandModel<'a>,
+    pub(crate) model: Model,
     forcefield: &'a dyn ForceField,
     search_box: SearchBox,
     pair_tables: Option<PairTables>,
+    flex_tables: Option<PairTables>,
 }
 
 impl<'a> Searcher<'a> {
     pub(crate) fn new(
-        ligand: &'a Molecule,
+        ligand: &Molecule,
+        flex: Option<&FlexResidues>,
         forcefield: &'a dyn ForceField,
         search_box: SearchBox,
     ) -> Result<Self, OptimizationError> {
-        let model = LigandModel::new(ligand);
-        let pair_tables = match forcefield.grid_cutoff() {
-            Some(cutoff) => Some(PairTables::build(
-                model.atoms,
-                &model.pairs,
-                forcefield,
-                cutoff,
-            )?),
-            None => None,
+        let model = Model::new(ligand, flex);
+        let tables = |pairs: &[(usize, usize)]| match forcefield.grid_cutoff() {
+            Some(cutoff) => PairTables::build(&model.atoms, pairs, forcefield, cutoff).map(Some),
+            None => Ok(None),
         };
+        let pair_tables = tables(&model.pairs)?;
+        let flex_tables = tables(&model.flex_pairs)?;
         Ok(Self {
             model,
             forcefield,
             search_box,
             pair_tables,
+            flex_tables,
         })
     }
 
@@ -573,7 +705,8 @@ impl<'a> Searcher<'a> {
     }
 
     /// Search energy (inter + intra) of `conf` and its [`Conf`] gradient
-    /// (Vina's `model::eval_deriv`).
+    /// (Vina's `model::eval_deriv`): every moving atom against the rigid
+    /// receptor, then the pairs among them.
     fn eval_deriv(
         &self,
         field: &dyn InterField,
@@ -584,14 +717,16 @@ impl<'a> Searcher<'a> {
     ) -> Result<(f64, DVector<f64>), OptimizationError> {
         self.model.coords(conf, &mut s.coords);
         s.grads.iter_mut().for_each(|g| *g = Vector3::zeros());
+        let n = self.model.n_movable;
         let mut e = field.eval(
-            self.model.atoms,
-            &s.coords,
+            &self.model.atoms[..n],
+            &s.coords[..n],
             slope,
             caps.receptor,
-            &mut s.grads,
+            &mut s.grads[..n],
         )?;
         e += self.intra(&s.coords, caps.intra, Some(&mut s.grads))?;
+        e += self.flex_pairs(&s.coords, caps.intra, Some(&mut s.grads))?;
         e += self.glue(&s.coords, caps.intra, &mut s.grads)?;
         Ok((e, self.model.conf_gradient(conf, &s.coords, &s.grads)))
     }
@@ -605,7 +740,7 @@ impl<'a> Searcher<'a> {
         cap: f64,
         grads: &mut [Vector3<f64>],
     ) -> Result<f64, OptimizationError> {
-        let atoms = self.model.atoms;
+        let atoms = &self.model.atoms;
         let mut total = 0.0;
         for &(i, j) in &self.model.glue {
             let delta = coords[i] - coords[j];
@@ -634,12 +769,38 @@ impl<'a> Searcher<'a> {
         &self,
         coords: &[Vector3<f64>],
         cap: f64,
+        grads: Option<&mut [Vector3<f64>]>,
+    ) -> Result<f64, OptimizationError> {
+        let tables = self.pair_tables.as_ref();
+        self.pair_energy(&self.model.pairs, tables, coords, cap, grads)
+    }
+
+    /// The flexible side chains' energy with the ligand and among
+    /// themselves, each pair curled with `cap`.
+    fn flex_pairs(
+        &self,
+        coords: &[Vector3<f64>],
+        cap: f64,
+        grads: Option<&mut [Vector3<f64>]>,
+    ) -> Result<f64, OptimizationError> {
+        let tables = self.flex_tables.as_ref();
+        self.pair_energy(&self.model.flex_pairs, tables, coords, cap, grads)
+    }
+
+    /// The energy of `pairs`, from `tables` (built for them) when there
+    /// are, each pair's positive energy curled with `cap`.
+    fn pair_energy(
+        &self,
+        pairs: &[(usize, usize)],
+        tables: Option<&PairTables>,
+        coords: &[Vector3<f64>],
+        cap: f64,
         mut grads: Option<&mut [Vector3<f64>]>,
     ) -> Result<f64, OptimizationError> {
-        let atoms = self.model.atoms;
+        let atoms = &self.model.atoms;
         let mut total = 0.0;
-        if let Some(tables) = &self.pair_tables {
-            for (n, &(i, j)) in self.model.pairs.iter().enumerate() {
+        if let Some(tables) = tables {
+            for (n, &(i, j)) in pairs.iter().enumerate() {
                 let delta = coords[i] - coords[j];
                 let r2 = delta.norm_squared();
                 if r2 >= tables.cutoff2 || r2 <= 1e-4 {
@@ -656,7 +817,7 @@ impl<'a> Searcher<'a> {
             }
             return Ok(total);
         }
-        for &(i, j) in &self.model.pairs {
+        for &(i, j) in pairs {
             let delta = coords[i] - coords[j];
             let r = delta.norm();
             if r <= 0.01 {
@@ -695,7 +856,7 @@ impl<'a> Searcher<'a> {
         max_steps: usize,
         s: &mut Scratch,
     ) -> Result<f64, OptimizationError> {
-        let n = 6 + self.model.n_torsions();
+        let n = 6 + self.model.n_torsions() + self.model.n_flex_torsions();
         let mut h = DMatrix::<f64>::identity(n, n);
         let (mut f0, mut g) = self.eval_deriv(field, x, slope, caps, s)?;
         let (f_orig, x_orig) = (f0, x.clone());
@@ -746,9 +907,11 @@ impl<'a> Searcher<'a> {
 
     /// Change exactly one thing (Vina's `mutate_conf`): the position by up to
     /// `amplitude` Angstroms, the orientation by up to `amplitude` over the
-    /// gyration radius, or one torsion to a uniformly random angle.
+    /// gyration radius, or one ligand or side-chain torsion to a uniformly
+    /// random angle.
     fn mutate(&self, conf: &mut Conf, amplitude: f64, rng: &mut StdRng, s: &mut Scratch) {
-        let entities = 2 + self.model.n_torsions();
+        let n = self.model.n_torsions();
+        let entities = 2 + n + self.model.n_flex_torsions();
         let which = rng.gen_range(0..entities);
         match which {
             0 => conf.position += amplitude * random_inside_sphere(rng),
@@ -762,12 +925,14 @@ impl<'a> Searcher<'a> {
                         UnitQuaternion::from_scaled_axis(rotation) * conf.orientation;
                 }
             }
-            k => conf.torsions[k - 2] = rng.gen_range(-PI..PI),
+            k if k < 2 + n => conf.torsions[k - 2] = rng.gen_range(-PI..PI),
+            k => conf.flex[k - 2 - n] = rng.gen_range(-PI..PI),
         }
     }
 
     /// A uniformly random pose: position in the box, orientation and every
-    /// torsion uniformly random (Vina's `conf::randomize`).
+    /// torsion, the side chains' included, uniformly random (Vina's
+    /// `conf::randomize`).
     fn random_conf(&self, rng: &mut StdRng) -> Conf {
         let target = self.search_box.random_point(rng);
         let orientation = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
@@ -782,12 +947,21 @@ impl<'a> Searcher<'a> {
             torsions: (0..self.model.n_torsions())
                 .map(|_| rng.gen_range(-PI..PI))
                 .collect(),
+            flex: (0..self.model.n_flex_torsions())
+                .map(|_| rng.gen_range(-PI..PI))
+                .collect(),
         }
     }
 
+    /// The moving heavy atoms' coordinates, which poses are clustered on
+    /// (Vina's `get_heavy_atom_movable_coords`).
     fn heavy_coords(&self, conf: &Conf, s: &mut Scratch) -> Vec<Vector3<f64>> {
         self.model.coords(conf, &mut s.coords);
-        self.model.heavy.iter().map(|&i| s.coords[i]).collect()
+        self.model
+            .movable_heavy
+            .iter()
+            .map(|&i| s.coords[i])
+            .collect()
     }
 
     /// One Monte Carlo chain (Vina's `monte_carlo::operator()`): mutate,
@@ -803,7 +977,7 @@ impl<'a> Searcher<'a> {
         let mut current = if settings.randomize {
             self.random_conf(&mut rng)
         } else {
-            Conf::identity(self.model.n_torsions())
+            self.model.identity()
         };
         let mut current_e = 0.0;
         let mut best_e = f64::INFINITY;
@@ -908,9 +1082,15 @@ impl<'a> Searcher<'a> {
     fn within_box(&self, conf: &Conf, s: &mut Scratch) -> bool {
         self.model.coords(conf, &mut s.coords);
         self.model
-            .heavy
+            .movable_heavy
             .iter()
             .all(|&i| self.search_box.contains(&s.coords[i], 1e-4))
+    }
+
+    /// The atoms scored against the rigid receptor, in the order the
+    /// field sees them.
+    pub(crate) fn movable_atoms(&self) -> &[Atom] {
+        &self.model.atoms[..self.model.n_movable]
     }
 
     /// Coordinates of `conf`.
@@ -1036,35 +1216,67 @@ mod tests {
 
     /// The analytic [`Conf`] gradient must match finite differences along
     /// each tangent direction, for both fields, on a flexible ligand.
-    ///
-    /// Vina's energy steps at the 8 A cutoff, so a difference whose step
-    /// straddles a pair crossing it is meaningless; those components are
-    /// recognised by disagreeing one-sided differences and skipped.
     #[test]
     fn test_conf_gradient_matches_finite_difference() {
         let receptor = data("receptor.pdbqt");
         let ligand = data("ligand.pdbqt");
-        let ff = VinaForceField::default();
         let center = ligand.center().unwrap();
-        let size = Vector3::repeat(20.0);
+        check_conf_gradient(&receptor, &ligand, None, center, Vector3::repeat(20.0), 6);
+    }
+
+    /// The same with three flexible side chains, whose torsions follow the
+    /// ligand's in the tangent space.
+    #[test]
+    fn test_flex_conf_gradient_matches_finite_difference() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/parity_data/5SAK_ZRY");
+        let receptor = parse_pdbqt(dir.join("flex_rigid.pdbqt")).unwrap();
+        let ligand = parse_pdbqt(dir.join("ligand_xtal.pdbqt")).unwrap();
+        let flex = crate::io::parse_flex_pdbqt(dir.join("flex.pdbqt"), &receptor).unwrap();
+        let center = ligand.center().unwrap();
+        let torsions = ligand.torsions.len() + flex.molecule.torsions.len();
+        check_conf_gradient(
+            &receptor,
+            &ligand,
+            Some(&flex),
+            center,
+            Vector3::repeat(24.0),
+            torsions,
+        );
+    }
+
+    /// Vina's energy steps at the 8 A cutoff, so a difference whose step
+    /// straddles a pair crossing it is meaningless; those components are
+    /// recognised by disagreeing one-sided differences and skipped.
+    fn check_conf_gradient(
+        receptor: &Molecule,
+        ligand: &Molecule,
+        flex: Option<&FlexResidues>,
+        center: Vector3<f64>,
+        size: Vector3<f64>,
+        torsions: usize,
+    ) {
+        let ff = VinaForceField::default();
         let search_box = SearchBox::new(&center, &size, 0.375);
-        let grids = GridSet::build(&ligand, &receptor, &ff, &center, &size, 0.0, 0.375)
+        let searcher = Searcher::new(ligand, flex, &ff, search_box).unwrap();
+        let mut movable = Molecule::new("movable");
+        movable.atoms = searcher.movable_atoms().to_vec();
+        let grids = GridSet::build(&movable, receptor, &ff, &center, &size, 0.0, 0.375)
             .unwrap()
             .unwrap();
-        let searcher = Searcher::new(&ligand, &ff, search_box).unwrap();
-        let exact = ExactField::new(&receptor, &ff, search_box);
+        let exact = ExactField::new(receptor, &ff, search_box);
         let mut rng = StdRng::seed_from_u64(3);
         let mut s = searcher.scratch();
-        let n = 6 + searcher.model.n_torsions();
-        assert_eq!(searcher.model.n_torsions(), 6);
+        let n_torsions = searcher.model.n_torsions();
+        let n = 6 + n_torsions + searcher.model.n_flex_torsions();
+        assert_eq!(n, 6 + torsions);
 
         let (mut checked, mut skipped) = (0, 0);
         let fields: [&dyn InterField; 2] = [&GridField(&grids), &exact];
         for field in fields {
             for _ in 0..4 {
-                let mut conf = Conf::identity(searcher.model.n_torsions());
-                for k in 0..searcher.model.n_torsions() {
-                    conf.torsions[k] = rng.gen_range(-0.3..0.3);
+                let mut conf = searcher.model.identity();
+                for t in conf.torsions.iter_mut().chain(conf.flex.iter_mut()) {
+                    *t = rng.gen_range(-0.3..0.3);
                 }
                 conf.position = 0.3 * random_inside_sphere(&mut rng);
                 let (f0, g) = searcher
@@ -1112,8 +1324,8 @@ mod tests {
         let ligand = data("ligand.pdbqt");
         let ff = VinaForceField::default();
         let search_box = SearchBox::new(&Vector3::zeros(), &Vector3::repeat(20.0), 0.375);
-        let tabled = Searcher::new(&ligand, &ff, search_box).unwrap();
-        let mut direct = Searcher::new(&ligand, &ff, search_box).unwrap();
+        let tabled = Searcher::new(&ligand, None, &ff, search_box).unwrap();
+        let mut direct = Searcher::new(&ligand, None, &ff, search_box).unwrap();
         direct.pair_tables = None;
         let mut rng = StdRng::seed_from_u64(9);
         for _ in 0..20 {
@@ -1134,8 +1346,8 @@ mod tests {
         let ligand = data("ligand.pdbqt");
         let ff = VinaForceField::default();
         let search_box = SearchBox::new(&Vector3::zeros(), &Vector3::repeat(20.0), 0.375);
-        let searcher = Searcher::new(&ligand, &ff, search_box).unwrap();
-        let coords = searcher.coords_of(&Conf::identity(searcher.model.n_torsions()));
+        let searcher = Searcher::new(&ligand, None, &ff, search_box).unwrap();
+        let coords = searcher.coords_of(&searcher.model.identity());
         for (atom, p) in ligand.atoms.iter().zip(&coords) {
             assert!((atom.coordinates - p).norm() < 1e-12);
         }
@@ -1154,7 +1366,7 @@ mod tests {
     #[test]
     fn test_container_keeps_distinct_low_poses() {
         let pose = |x: f64, e: f64| Pose {
-            conf: Conf::identity(0),
+            conf: Conf::identity(0, 0),
             e,
             heavy: vec![Vector3::new(x, 0.0, 0.0)],
         };

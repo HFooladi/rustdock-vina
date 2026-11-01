@@ -15,7 +15,8 @@ in `tests/parity_data/golden.tsv`:
   finds the crystal pose;
 - for about ten complexes, the crystal pose scored with flexible side chains:
   up to three residues next to the ligand, prepared with Meeko as
-  `flex_rigid.pdbqt` and `flex.pdbqt`.
+  `flex_rigid.pdbqt` and `flex.pdbqt`; those also docked are docked with the
+  side chains too, recording Vina's affinity and top-1 RMSD.
 
 Only PoseBusters complexes are used. They come from the PDB, so they can be
 redistributed, which PDBbind/CASF structures cannot.
@@ -277,7 +278,8 @@ def vina_score_flex(rigid: Path, flex: Path, ligand: Path, scoring: str,
 
 def add_flex(row: dict, src: Path, dst: Path) -> bool:
     """Prepare flexible residues for one complex and add Vina's flex scores of
-    its crystal pose to `row`; False if it has too few contact residues."""
+    its crystal pose to `row`, and for a docked complex Vina's flex docking;
+    False if it has too few contact residues."""
     xtal = (src / "ligand_xtal.pdbqt").read_text()
     residues = prepare_flex(src, dst, row["code"], xtal)
     if not residues:
@@ -285,9 +287,12 @@ def add_flex(row: dict, src: Path, dst: Path) -> bool:
     flex_text = (dst / "flex.pdbqt").read_text()
     full = dst / "flex_rigid_full.pdbqt"
     (dst / "flex_rigid.pdbqt").rename(full)
-    (dst / "flex_rigid.pdbqt").write_text(
-        trim_receptor(full.read_text(), near_ligands(xtal, flex_text)))
     center, size = flex_box(xtal, flex_text)
+    if row["dock"]:
+        keep = near_box(center, size, (src / "ligand_start.pdbqt").read_text())
+    else:
+        keep = near_ligands(xtal, flex_text)
+    (dst / "flex_rigid.pdbqt").write_text(trim_receptor(full.read_text(), keep))
     row["flex_residues"] = " ".join(residues)
     for axis, c, sz in zip("xyz", center, size):
         row[f"flex_center_{axis}"], row[f"flex_size_{axis}"] = c, sz
@@ -301,7 +306,30 @@ def add_flex(row: dict, src: Path, dst: Path) -> bool:
         for name, value in terms.items():
             row[f"{scoring}_flex_{name}"] = value
     full.unlink()
+    if row["dock"]:
+        affinity, rmsd = vina_dock_flex(dst, center, size)
+        row["vina_flex_dock_affinity"], row["vina_flex_dock_rmsd"] = affinity, rmsd
+        # Docked in CI only if Vina finds the crystal pose with room to spare.
+        row["flex_dock"] = rmsd < 1.5
     return True
+
+
+def vina_dock_flex(dst: Path, center: np.ndarray, size: np.ndarray) -> tuple[float, float]:
+    """Vina's top affinity and in-order top-1 heavy-atom RMSD to the crystal
+    pose, docking `ligand_start.pdbqt` with the flexible side chains (seed
+    42, exhaustiveness 8)."""
+    out = dst / "vina_flex_out.pdbqt"
+    box = [x for k, values in (("center", center), ("size", size))
+           for a, v in zip("xyz", values) for x in (f"--{k}_{a}", str(v))]
+    subprocess.run([str(VINA), "--receptor", str(dst / "flex_rigid.pdbqt"),
+                    "--flex", str(dst / "flex.pdbqt"), "--ligand", str(dst / "ligand_start.pdbqt"),
+                    "--seed", "42", "--exhaustiveness", "8", "--cpu", "16", *box,
+                    "--out", str(out)], capture_output=True, text=True, check=True)
+    top = first_model(out.read_text())
+    out.unlink()
+    affinity = float(re.search(r"REMARK VINA RESULT:\s*(-?[\d.]+)", top).group(1))
+    ligand = top[:top.index("BEGIN_RES")]
+    return affinity, heavy_rmsd((dst / "ligand_xtal.pdbqt").read_text(), ligand)
 
 
 def vina_score(receptor: Path, ligand: Path, scoring: str) -> tuple[float, float]:

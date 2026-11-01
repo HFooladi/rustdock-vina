@@ -53,6 +53,11 @@ pub fn parse_pdbqt<P: AsRef<Path>>(path: P) -> Result<Molecule, IoError> {
         if line.trim().is_empty() || line.starts_with('#') {
             continue;
         }
+        // Docking output with flexible side chains has them after the
+        // ligand in each model; they are not part of it.
+        if line.starts_with("BEGIN_RES") {
+            break;
+        }
 
         // Keep the file's own records for the writer. Model delimiters and
         // the score remarks of a previous docking run are not part of the
@@ -611,7 +616,8 @@ pub fn write_pdbqt<P: AsRef<Path>>(molecule: &Molecule, path: P) -> Result<(), I
 ///
 /// Each model carries Vina's score remarks (`VINA RESULT` with the affinity
 /// and RMSD from the best mode, then the inter/intra breakdown when the
-/// result has it) followed by the ligand's own records, so Vina, Meeko and
+/// result has it) followed by the ligand's own records and then any
+/// flexible side chains' (their `BEGIN_RES` blocks), so Vina, Meeko and
 /// rustdock all read it back.
 pub fn write_docking_results<P: AsRef<Path>>(
     results: &[crate::optimization::DockingResult],
@@ -650,6 +656,10 @@ pub fn write_docking_results<P: AsRef<Path>>(
             }
         }
         write_molecule_records(&mut file, &result.molecule)?;
+        // Vina writes the moved side chains after the ligand, in each model.
+        if let Some(flex) = &result.flex {
+            write_molecule_records(&mut file, flex)?;
+        }
         writeln!(file, "ENDMDL")?;
     }
 
@@ -754,6 +764,7 @@ mod tests {
         let result = |molecule: Molecule, energy: f64| crate::optimization::DockingResult {
             energy,
             molecule,
+            flex: None,
             energy_components: vec![
                 ("Intermolecular".to_string(), -9.0),
                 ("Intramolecular".to_string(), -0.5),
@@ -1017,5 +1028,35 @@ ATOM   1954  N   THR A 222      28.499   2.529  55.204  1.00  0.00    -0.341 N
         assert!(parse_flex_text(&unclosed).is_err());
         let bad_branch = FLEX.replace("BRANCH   2   4", "BRANCH  99   4");
         assert!(parse_flex_text(&bad_branch).is_err());
+    }
+
+    /// Docking output with flexible side chains writes each model's moved
+    /// residues after the ligand, and reads back as the ligand alone.
+    #[test]
+    fn test_docking_results_with_flex_read_back() {
+        let ligand = parse_pdbqt(fixture("ligand_meeko.pdbqt")).unwrap();
+        let mut flex = parse_flex_text(FLEX).unwrap();
+        flex.molecule.atoms[5].coordinates.x += 1.0;
+        let result = crate::optimization::DockingResult {
+            energy: -7.0,
+            molecule: ligand.clone(),
+            flex: Some(flex.molecule.clone()),
+            energy_components: Vec::new(),
+            rmsd: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("docked.pdbqt");
+        write_docking_results(&[result.clone(), result], &out).unwrap();
+
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(text.matches("BEGIN_RES TYR A 79").count(), 2);
+        let model = text.split("ENDMDL").next().unwrap();
+        let begin = model.find("BEGIN_RES").unwrap();
+        assert!(model[..begin].contains("TORSDOF"));
+        assert!(model.contains("ATOM    106 CE1  TYR A  79      29.091"));
+
+        let back = parse_pdbqt(&out).unwrap();
+        assert_eq!(back.atoms.len(), ligand.atoms.len());
+        assert_eq!(back.pdbqt_records, ligand.pdbqt_records);
     }
 }
