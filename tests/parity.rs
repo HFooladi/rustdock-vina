@@ -9,9 +9,9 @@ use nalgebra::Vector3;
 use rustdock_vina::forcefield::vina::VinaForceField;
 use rustdock_vina::forcefield::vinardo::VinardoForceField;
 use rustdock_vina::forcefield::ForceField;
-use rustdock_vina::io::parse_pdbqt;
+use rustdock_vina::io::{parse_flex_pdbqt, parse_pdbqt};
 use rustdock_vina::optimization::monte_carlo::{MonteCarlo, MonteCarloParams};
-use rustdock_vina::scoring::score_pose;
+use rustdock_vina::scoring::{score_pose, score_pose_with_flex};
 use rustdock_vina::Molecule;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -57,6 +57,11 @@ impl Complex {
 
     fn docked(&self) -> bool {
         self.0["dock"] == "True"
+    }
+
+    /// Whether the complex has flexible side chains (`flex.pdbqt`).
+    fn flexible(&self) -> bool {
+        self.0.get("flex_residues").is_some_and(|r| !r.is_empty())
     }
 
     fn load(&self, file: &str) -> Molecule {
@@ -115,6 +120,47 @@ fn check_scores(forcefield: &dyn ForceField, ligand: &str, prefix: &str) {
     );
 }
 
+/// Scores the crystal pose of every complex with flexible side chains and
+/// compares each energy term with Vina's `<scoring>_flex_*` columns.
+fn check_flex_scores(forcefield: &dyn ForceField, scoring: &str) {
+    let complexes: Vec<_> = golden().into_iter().filter(Complex::flexible).collect();
+    assert!(
+        complexes.len() >= 5,
+        "golden.tsv has too few flex complexes"
+    );
+    let mut failures = Vec::new();
+    for complex in &complexes {
+        let rigid = complex.load("flex_rigid.pdbqt");
+        let path = data_dir().join(complex.code()).join("flex.pdbqt");
+        let flex =
+            parse_flex_pdbqt(&path, &rigid).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let pose = complex.load("ligand_xtal.pdbqt");
+        let score = score_pose_with_flex(&pose, &rigid, Some(&flex), forcefield).expect("score");
+        for (name, ours) in [
+            ("inter", score.intermolecular),
+            ("affinity", score.affinity),
+            ("lig_flex", score.ligand_flex),
+            ("flex_rec", score.flex_receptor),
+            ("flex_flex", score.flex_flex),
+        ] {
+            let vina = complex.value(&format!("{scoring}_flex_{name}"));
+            if (ours - vina).abs() > SCORE_TOLERANCE {
+                failures.push(format!(
+                    "{} {name}: rustdock {ours:.3}, Vina {vina:.3} (diff {:+.3})",
+                    complex.code(),
+                    ours - vina
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} flex scores differ from Vina 1.2.7 by more than {SCORE_TOLERANCE}:\n  {}",
+        forcefield.name(),
+        failures.join("\n  ")
+    );
+}
+
 #[test]
 fn crystal_scores_match_vina() {
     check_scores(&VinaForceField::default(), "ligand_xtal.pdbqt", "vina_xtal");
@@ -127,6 +173,16 @@ fn crystal_scores_match_vinardo() {
         "ligand_xtal.pdbqt",
         "vinardo_xtal",
     );
+}
+
+#[test]
+fn crystal_flex_scores_match_vina() {
+    check_flex_scores(&VinaForceField::default(), "vina");
+}
+
+#[test]
+fn crystal_flex_scores_match_vinardo() {
+    check_flex_scores(&VinardoForceField::default(), "vinardo");
 }
 
 /// Vina's own top docked pose, read from its output, scores as Vina scores it.
