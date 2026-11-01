@@ -7,12 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- During Monte Carlo the ligand-receptor energy is capped at 10 per atom, as
-  in Vina 1.2.7, not 1.5. 1.5 is the default of Vina's `monte_carlo`, but
-  `Vina::global_search` sets `hunt_cap` to `(10, 10, 10)` before docking
-  (`vina.cpp`). The parity tables are rerun with the fix.
-
 ### Added
 - `rustdock score --flex` scores a pose with flexible side chains as AutoDock
   Vina 1.2.7 does: the ligand against the side chains, the side chains against
@@ -40,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against Vina 1.2.7's `--score_only --flex` to within 0.02 kcal/mol. It
   docks three of them with their side chains and checks the top affinity
   against Vina's (`flex_docking_matches_vina`).
+- The parity harness docks with flexible side chains (`parity.py run
+  --flex`): up to three residues next to the ligand, prepared with Meeko.
+  On CASF-2016 (234 complexes Meeko could prepare, five seeds) rustdock's
+  top-1 success is 44.4% against Vina's 44.0%, in 10.6 s against 15.6 s.
 - The parity harness docks with several seeds (`--seeds`) and several
   complexes at once on pinned cores (`--jobs`), and reports success rates
   over seeds with a paired comparison. The README's parity tables now come
@@ -52,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BRANCH records are matched to atoms by serial number, as Vina does, not by
   position in the file, and a BRANCH naming an atom that has not been read is
   an error instead of being skipped.
+
+### Fixed
+- During Monte Carlo the ligand-receptor energy is capped at 10 per atom, as
+  in Vina 1.2.7, not 1.5. 1.5 is the default of Vina's `monte_carlo`, but
+  `Vina::global_search` sets `hunt_cap` to `(10, 10, 10)` before docking
+  (`vina.cpp`). The five-seed parity is rerun with the fix: rustdock's
+  Vinardo edge over Vina (+2.2 and +1.8 points) is gone (+0.8 and −0.3), and
+  with Vina scoring the paired differences are −1.1 and +0.3 points.
 
 ## [0.2.0] - 2026-10-19
 

@@ -40,12 +40,12 @@ per-complex reports are in [`benchmark/parity/`](benchmark/parity/).
 | | CASF-2016 (285): Vina | CASF-2016: rustdock | PoseBusters (428): Vina | PoseBusters: rustdock |
 |---|---|---|---|---|
 | Docked without error | 280 | 285 | 424 | 428 |
-| Top-1 success (< 2 Å, %) | 53.3 ± 0.7 | 54.3 ± 0.2 | 54.7 ± 0.8 | 55.2 ± 0.3 |
-| Any-mode success (< 2 Å, %) | 78.2 ± 0.7 | 79.2 ± 1.7 | 77.6 ± 1.4 | 79.0 ± 0.8 |
-| Median top-1 RMSD (Å) | 1.65 | 1.61 | 1.77 | 1.77 |
-| Top-1 PoseBusters-valid (%) | 90.7 | 92.8 | 93.4 | 93.7 |
-| Median wall time (s) | 4.0 | 3.0 | 5.3 | 4.5 |
-| Paired top-1 difference, rustdock − Vina (95% CI) | | −0.1 pp (−1.4 to +1.2) | | −0.2 pp (−1.6 to +1.1) |
+| Top-1 success (< 2 Å, %) | 53.3 ± 0.7 | 53.3 ± 0.8 | 54.7 ± 0.8 | 55.7 ± 0.7 |
+| Any-mode success (< 2 Å, %) | 78.2 ± 0.7 | 77.6 ± 1.6 | 77.6 ± 1.4 | 78.6 ± 0.5 |
+| Median top-1 RMSD (Å) | 1.65 | 1.74 | 1.77 | 1.76 |
+| Top-1 PoseBusters-valid (%) | 90.7 | 92.6 | 93.4 | 94.2 |
+| Median wall time (s) | 4.0 | 3.1 | 5.3 | 4.5 |
+| Paired top-1 difference, rustdock − Vina (95% CI) | | −1.1 pp (−2.6 to +0.3) | | +0.3 pp (−1.0 to +1.6) |
 
 **Vinardo scoring** ([CASF-2016](benchmark/parity/PARITY_full_vinardo_seeds.md),
 [PoseBusters](benchmark/parity/PARITY_posebusters_vinardo_seeds.md))
@@ -53,12 +53,33 @@ per-complex reports are in [`benchmark/parity/`](benchmark/parity/).
 | | CASF-2016 (285): Vina | CASF-2016: rustdock | PoseBusters (428): Vina | PoseBusters: rustdock |
 |---|---|---|---|---|
 | Docked without error | 280 | 285 | 424 | 428 |
-| Top-1 success (< 2 Å, %) | 51.5 ± 1.1 | 54.0 ± 0.8 | 49.3 ± 0.6 | 51.6 ± 0.4 |
-| Any-mode success (< 2 Å, %) | 72.2 ± 2.8 | 75.3 ± 1.3 | 71.2 ± 0.9 | 74.3 ± 0.8 |
-| Median top-1 RMSD (Å) | 1.84 | 1.76 | 2.01 | 1.91 |
-| Top-1 PoseBusters-valid (%) | 90.8 | 92.4 | 92.8 | 93.6 |
-| Median wall time (s) | 4.3 | 3.3 | 5.7 | 4.6 |
-| Paired top-1 difference, rustdock − Vina (95% CI) | | +2.2 pp (+0.6 to +3.9) | | +1.8 pp (+0.5 to +3.1) |
+| Top-1 success (< 2 Å, %) | 51.5 ± 1.1 | 52.9 ± 1.2 | 49.3 ± 0.6 | 49.5 ± 0.8 |
+| Any-mode success (< 2 Å, %) | 72.2 ± 2.8 | 73.5 ± 0.9 | 71.2 ± 0.9 | 70.6 ± 0.6 |
+| Median top-1 RMSD (Å) | 1.84 | 1.82 | 2.01 | 2.04 |
+| Top-1 PoseBusters-valid (%) | 90.8 | 92.0 | 92.8 | 93.1 |
+| Median wall time (s) | 4.3 | 3.6 | 5.7 | 4.8 |
+| Paired top-1 difference, rustdock − Vina (95% CI) | | +0.8 pp (−0.5 to +2.1) | | −0.3 pp (−1.5 to +0.8) |
+
+**Flexible side chains, Vina scoring** ([CASF-2016](benchmark/parity/PARITY_full_flex_seeds.md))
+
+Up to three residues whose side chains are within 4 Å of the crystal
+ligand were made flexible with Meeko's `mk_prepare_receptor.py --flexres`,
+and the box was widened to cover them. Meeko could not prepare 51 of the 285
+complexes, mostly ones with ions or metals it has no covalent radius for
+([list](benchmark/parity/PARITY_full_flex_excluded.tsv)); they are left out
+for both programs.
+
+| | CASF-2016 (234): Vina | CASF-2016: rustdock |
+|---|---|---|
+| Top-1 success (< 2 Å, %) | 44.0 ± 1.2 | 44.4 ± 0.9 |
+| Any-mode success (< 2 Å, %) | 72.5 ± 1.3 | 72.9 ± 1.5 |
+| Median top-1 RMSD (Å) | 2.67 | 2.63 |
+| Top-1 PoseBusters-valid (%) | 70.0 | 69.5 |
+| Median wall time (s) | 15.6 | 10.6 |
+| Paired top-1 difference, rustdock − Vina (95% CI) | | +0.4 pp (−1.1 to +2.1) |
+
+PoseBusters checks the ligand against the protein with its crystal side
+chains, so moved side chains it overlaps count against both programs.
 
 The paired difference compares each complex's top-1 success rate over the
 five seeds, on the complexes both programs docked; the CI is a bootstrap over
@@ -67,16 +88,23 @@ complexes. Single-seed reports (seed 42) with every complex are also in
 
 - **Scoring.** For all 704 crystal poses that Vina could read, rustdock's
   score is within 0.03 kcal/mol of Vina's, with either scoring function.
-- **Search.** With Vina scoring, top-1 success is the same as Vina's to
-  within about 1.5 percentage points either way. With Vinardo, rustdock finds
-  the crystal pose about 2 points more often than Vina, a small difference
-  that is unlikely to be chance (Wilcoxon p ≤ 0.02 on both sets). Its cause
-  is not yet known.
+- **Search.** Top-1 success is the same as Vina's to within about 1.5
+  percentage points on every set, with both scoring functions and with
+  flexible side chains; every 95% CI includes zero. On CASF-2016 with Vina
+  scoring the rates are equal (53.3%), but on the 280 complexes Vina can
+  dock rustdock is 1.1 points lower, a gap at the edge of chance (Wilcoxon
+  p = 0.02, CI −2.6 to +0.3) that PoseBusters does not show. Top affinities
+  have a median difference within 0.01 kcal/mol of Vina's.
+- **The Vinardo edge was the search cap.** An earlier run had rustdock about
+  2 points ahead of Vina with Vinardo. During Monte Carlo, rustdock capped
+  each atom's energy against the receptor at 1.5 kcal/mol, the default in
+  Vina's `monte_carlo.h`, where Vina 1.2.7's docking sets it to 10. With the
+  cap at 10 the edge is gone.
 - **Errors.** Vina rejects receptors containing As, Xe, Mo or B; rustdock
   docks them.
 - **Output.** Vina reads rustdock's output files. It rescores the top pose
-  at a median 0.002–0.003 kcal/mol from the affinity rustdock reports, and
-  at most 0.020.
+  at a median 0.002–0.004 kcal/mol from the affinity rustdock reports, and
+  at most 0.019.
 - **Screening.** Docking 100 CASF-2016 ligands into one pocket on 96 threads
   took 141 s with `--batch`, against 1024 s with Vina 1.2.7's `--batch` and
   210 s with 12 Vina processes of 8 threads. The best affinities correlate
@@ -157,9 +185,9 @@ the ligand counts toward the affinity; their energy with the rest of the
 receptor and with each other is internal and only ranks the modes. The box
 must cover the side chains as well as the ligand.
 
-On the parity fixtures, rustdock and Vina 1.2.7 reach the same top pose with
-flexible side chains, and their top affinities agree to within 0.03
-kcal/mol (`flex_docking_matches_vina` in `tests/parity.rs`).
+Docking CASF-2016 with flexible side chains, rustdock matches Vina's
+success rate and takes about two thirds of its time (see
+[Parity](#parity-with-autodock-vina)).
 
 ### Screening a library
 
