@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-01
+
 ### Added
 - `rustdock score --flex` scores a pose with flexible side chains as AutoDock
   Vina 1.2.7 does: the ligand against the side chains, the side chains against

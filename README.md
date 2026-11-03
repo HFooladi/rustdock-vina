@@ -93,8 +93,13 @@ complexes. Single-seed reports (seed 42) with every complex are also in
   flexible side chains; every 95% CI includes zero. On CASF-2016 with Vina
   scoring the rates are equal (53.3%), but on the 280 complexes Vina can
   dock rustdock is 1.1 points lower, a gap at the edge of chance (Wilcoxon
-  p = 0.02, CI −2.6 to +0.3) that PoseBusters does not show. Top affinities
-  have a median difference within 0.01 kcal/mol of Vina's.
+  p = 0.02, CI −2.6 to +0.3) that PoseBusters does not show. The docks only
+  one program solves split both ways: on CASF-2016, 39 for Vina and 23 for
+  rustdock; on PoseBusters, 70 and 76; together, 109 and 99. In most of them
+  the loser's top pose scores worse than the winner's, so its search missed
+  the crystal basin the other found, rather than scoring pulling it
+  elsewhere. Top affinities have a median difference within 0.01 kcal/mol
+  of Vina's.
 - **The Vinardo edge was the search cap.** An earlier run had rustdock about
   2 points ahead of Vina with Vinardo. During Monte Carlo, rustdock capped
   each atom's energy against the receptor at 1.5 kcal/mol, the default in

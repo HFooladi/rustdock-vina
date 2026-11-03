@@ -1,6 +1,6 @@
 [package]
 name = "rustdock-vina"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Hosein Fooladi <fooladi.hosein@gmail.com>"]
 description = "A Rust implementation of AutoDock Vina molecular docking algorithm"
