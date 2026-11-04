@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- A virtual-screening parity benchmark (`benchmark/screening/`): ten DUDE-Z
+  targets with all their actives and decoys (41,108 compounds), docked by
+  rustdock and AutoDock Vina 1.2.7 with two seeds. ROC AUC, BEDROC and
+  enrichment factors match Vina's within its seed-to-seed noise.
+
 ## [0.3.0] - 2026-11-01
 
 ### Added
