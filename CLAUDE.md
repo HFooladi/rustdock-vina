@@ -68,6 +68,7 @@ tests/
 └── test_data/            # receptor.pdbqt, ligand.pdbqt
 benches/                  # Criterion benchmarks: docking, grid, optimization, scoring
 benchmark/parity/         # CASF-2016/PoseBusters parity vs AutoDock Vina, rigid and --flex (Python, uv venv); see its README
+benchmark/screening/      # DUDE-Z virtual-screening parity vs AutoDock Vina (AUC, BEDROC, EF); uses the parity venv
 ```
 
 ### Key Types

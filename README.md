@@ -81,6 +81,22 @@ for both programs.
 PoseBusters checks the ligand against the protein with its crystal side
 chains, so moved side chains it overlaps count against both programs.
 
+**Virtual screening, Vina scoring** ([DUDE-Z](benchmark/screening/SCREENING.md))
+
+Ten DUDE-Z targets (AA2AR, ABL1, ACES, AMPC, ANDR, EGFR, HIVPR, HS90A, PARP1,
+THRB) with all their actives and decoys: 665 actives and 40,443 decoys,
+docked by both programs from the same inputs with seeds 42 and 1, one thread
+per dock. A compound scores its best top-pose affinity over its protomers.
+The harness and protocol are in [`benchmark/screening/`](benchmark/screening/).
+
+| Mean over 10 targets (seed 42) | Vina | rustdock | rustdock − Vina (95% CI) | Vina − Vina, two seeds |
+|---|---|---|---|---|
+| ROC AUC | 0.678 | 0.678 | +0.000 (−0.003 to +0.003) | +0.002 |
+| BEDROC (α = 20) | 0.192 | 0.189 | −0.003 (−0.008 to +0.001) | −0.001 |
+| EF1% | 7.1 | 6.7 | −0.37 (−1.21 to +0.69) | −0.22 |
+| EF5% | 3.76 | 3.58 | −0.19 (−0.38 to +0.09) | −0.09 |
+| Mean seconds per dock (one thread) | 26.7 | 23.8 | | |
+
 The paired difference compares each complex's top-1 success rate over the
 five seeds, on the complexes both programs docked; the CI is a bootstrap over
 complexes. Single-seed reports (seed 42) with every complex are also in
@@ -110,7 +126,16 @@ complexes. Single-seed reports (seed 42) with every complex are also in
 - **Output.** Vina reads rustdock's output files. It rescores the top pose
   at a median 0.002–0.004 kcal/mol from the affinity rustdock reports, and
   at most 0.019.
-- **Screening.** Docking 100 CASF-2016 ligands into one pocket on 96 threads
+- **Virtual screening.** rustdock ranks actives above decoys as Vina does:
+  every difference is inside its CI around zero and the size of Vina's own
+  seed-to-seed difference. Per compound, its scores correlate with Vina's at
+  Spearman 0.994, as Vina's do with themselves across seeds. rustdock's top
+  affinity is a little lower more often than Vina's (19.9% vs 11.1% of
+  compounds by more than 0.05 kcal/mol), and Vina's scoring agrees. That
+  comes mostly from rustdock refining poses on exact pair energies, where
+  Vina interpolates lookup tables
+  ([analysis](benchmark/screening/README.md#rustdock-finds-slightly-lower-minima)).
+- **Batch speed.** Docking 100 CASF-2016 ligands into one pocket on 96 threads
   took 141 s with `--batch`, against 1024 s with Vina 1.2.7's `--batch` and
   210 s with 12 Vina processes of 8 threads. The best affinities correlate
   with Vina's at Pearson 0.98.
