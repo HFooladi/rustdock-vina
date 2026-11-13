@@ -146,8 +146,10 @@ complexes. Single-seed reports (seed 42) with every complex are also in
   AutoDock4 and warns when selected.
 - **PDBQT is the only input format.** There is no preparation step, so
   prepare inputs with Meeko, ADFR or MGLTools.
-- **Config files** set only `center_x/y/z` and `size_x/y/z`; other keys are
-  reported and ignored.
+- **Not every Vina option is implemented.** A config file or command line
+  may set any option listed below; `--score_only`, `--local_only`,
+  `--autobox`, `--randomize_only`, `--maps` and the `--weight_*` overrides
+  are not supported, and are reported rather than ignored.
 
 ## Installation
 
@@ -181,21 +183,24 @@ All `dock` options:
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--receptor <FILE>` | PDBQT file containing the receptor (required) | |
-| `--ligand <FILE>` | PDBQT file containing the ligand to dock | |
+| `--ligand <FILE>...` | PDBQT file(s) containing the ligand to dock; each is docked on its own | |
 | `--flex <FILE>` | Flexible side chains, as for Vina's `--flex`; `--receptor` is then the rigid part | |
-| `-c, --config <FILE>` | Configuration file for docking parameters | |
+| `-c, --config <FILE>` | Configuration file; the command line overrides it | |
 | `--center <X,Y,Z>` | Center of the search box | |
+| `--center_x/_y/_z <A>` | Center one axis at a time, as in Vina | |
 | `--size <X,Y,Z>` | Size of the search box | |
+| `--size_x/_y/_z <A>` | Size one axis at a time, as in Vina | |
 | `--scoring <NAME>` | Scoring function: `vina`, `vinardo`, or experimental `ad4` | `vina` |
 | `--exhaustiveness <N>` | Search exhaustiveness (higher = more accurate, slower) | `8` |
-| `--num-modes <N>` | Number of binding modes to generate | `9` |
-| `-o, --out <FILE>` | Output file for docking results | |
+| `--num-modes <N>`, `--num_modes` | Number of binding modes to generate | `9` |
+| `--min-rmsd <A>`, `--min_rmsd` | Minimum heavy-atom RMSD between output modes | `1.0` |
+| `-o, --out <FILE>` | Output file for docking results | `<ligand>_out.pdbqt` |
 | `--batch <FILE/DIR>...` | Ligands to screen: PDBQT files, or directories of them | |
 | `--dir <DIR>` | Output directory (required with `--batch`) | |
-| `--cpu <N>` | Number of threads | all cores |
-| `--energy-range <KCAL>` | Energy range for output poses (kcal/mol) | `3.0` |
-| `--seed <N>` | Random seed; the same seed and inputs give the same poses | random |
-| `--grid-spacing <A>` | Spacing of the precomputed affinity grids | `0.375` |
+| `--cpu <N>` | Number of threads; `0` uses all cores | all cores |
+| `--energy-range <KCAL>`, `--energy_range` | Energy range for output poses (kcal/mol) | `3.0` |
+| `--seed <N>` | Random seed; `0` draws one and prints it, as in Vina | random |
+| `--grid-spacing <A>`, `--spacing` | Spacing of the precomputed affinity grids | `0.375` |
 | `--no-grid` | Search on exact pairwise energies (slow) | |
 
 ### Flexible side chains
@@ -268,9 +273,14 @@ rustdock's affinity.
 
 ### Configuration file
 
-Instead of passing `--center` and `--size` on the command line, you can use a configuration file (`key = value` format, `#` for comments):
+A configuration file written for AutoDock Vina 1.2.7 runs unchanged. It
+holds `key = value` lines (`#` starts a comment) and may set any `dock`
+option in Vina's spelling, not just the search box:
 
 ```ini
+receptor = protein.pdbqt
+ligand = ligand.pdbqt
+
 # Search box center
 center_x = 15.190
 center_y = 53.903
@@ -280,11 +290,25 @@ center_z = 16.917
 size_x = 20.0
 size_y = 20.0
 size_z = 20.0
+
+exhaustiveness = 8
+num_modes = 9
+seed = 42
 ```
 
 ```bash
-rustdock dock --receptor protein.pdbqt --ligand ligand.pdbqt --config params.txt
+rustdock dock --config params.txt
 ```
+
+As in Vina, an option given on the command line overrides the file, so the
+same config can be reused across runs:
+
+```bash
+rustdock dock --config params.txt --exhaustiveness 32 --out deep.pdbqt
+```
+
+An unknown key, a key set twice, or an option rustdock does not implement
+is an error naming the line, rather than a silently different run.
 
 ### Example with test data
 

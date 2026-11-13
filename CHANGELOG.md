@@ -8,10 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- A configuration file written for AutoDock Vina 1.2.7 now runs unchanged.
+  `--config` reads every `dock` option in Vina's spelling (`receptor`,
+  `ligand`, `batch`, `flex`, `out`, `dir`, `scoring`, `exhaustiveness`,
+  `num_modes`, `min_rmsd`, `energy_range`, `spacing`, `cpu`, `seed`), not
+  just the search box, and the command line overrides it as Boost does. An
+  unknown key, a key set twice, or an option rustdock does not implement is
+  an error naming the line, rather than a silently different run.
+- Vina's flag spellings as aliases: `--num_modes`, `--energy_range`,
+  `--spacing`, and `--center_x/_y/_z`, `--size_x/_y/_z` for setting the
+  search box one axis at a time.
+- `--min_rmsd`, the minimum heavy-atom RMSD between output modes (Vina's
+  default, 1 A, was previously fixed).
 - A virtual-screening parity benchmark (`benchmark/screening/`): ten DUDE-Z
   targets with all their actives and decoys (41,108 compounds), docked by
   rustdock and AutoDock Vina 1.2.7 with two seeds. ROC AUC, BEDROC and
   enrichment factors match Vina's within its seed-to-seed noise.
+
+### Changed
+- `--receptor` may now come from the config file, so it is no longer
+  required on the command line.
+- Without `--out` or `--dir`, poses go to `<ligand>_out.pdbqt` beside the
+  ligand, as in Vina, instead of the working directory.
+- `--seed 0` draws a random seed and prints it, as in Vina; every run now
+  logs its seed, so it can be reproduced.
+- Several `--ligand` files with a single `--out` is now an error. rustdock
+  docks each ligand on its own, so they would have overwritten each other.
 
 ## [0.3.0] - 2026-11-01
 
