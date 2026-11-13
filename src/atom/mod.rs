@@ -5,6 +5,26 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Represents different atom types supported in the forcefield
+/// A chemical element, as Vina's `el_type`: what `same_element` compares.
+/// Vina keeps one `Metal` for every metal and a `Dummy` for the macrocycle
+/// closure placeholders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Element {
+    Carbon,
+    Nitrogen,
+    Oxygen,
+    Sulfur,
+    Phosphorus,
+    Fluorine,
+    Chlorine,
+    Bromine,
+    Iodine,
+    Hydrogen,
+    Metal,
+    Dummy,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AtomType {
     // Non-hydrogen types
@@ -245,6 +265,30 @@ impl AtomType {
     /// Whether this is a macrocycle closure dummy (`G0`-`G3`).
     pub fn is_closure_dummy(&self) -> bool {
         matches!(self, AtomType::ClosureDummy(_))
+    }
+
+    /// The chemical element this type stands for, as Vina's
+    /// `ad_type_to_el_type`. Hydrogen-bonding variants fall together with
+    /// their plain type (`OA` with `O`), closure carbons are carbon, and
+    /// every metal is one element, since Vina's `same_element` "does not
+    /// distinguish metals".
+    pub fn element(&self) -> Element {
+        match self {
+            AtomType::Carbon | AtomType::CarbonClosure(_) => Element::Carbon,
+            AtomType::Nitrogen | AtomType::NitrogenH => Element::Nitrogen,
+            AtomType::Oxygen | AtomType::OxygenH => Element::Oxygen,
+            AtomType::Sulfur | AtomType::SulfurH => Element::Sulfur,
+            AtomType::Phosphorus => Element::Phosphorus,
+            AtomType::Fluorine => Element::Fluorine,
+            AtomType::Chlorine => Element::Chlorine,
+            AtomType::Bromine => Element::Bromine,
+            AtomType::Iodine => Element::Iodine,
+            AtomType::Hydrogen | AtomType::HydrogenD => Element::Hydrogen,
+            AtomType::ClosureDummy(_) => Element::Dummy,
+            AtomType::Unknown => Element::Unknown,
+            // Every metal, named or generic, is `EL_TYPE_Met` to Vina.
+            _ => Element::Metal,
+        }
     }
 
     /// Whether `a` and `b` are a closure dummy and the carbon it is glued

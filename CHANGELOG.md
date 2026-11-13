@@ -25,6 +25,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rustdock and AutoDock Vina 1.2.7 with two seeds. ROC AUC, BEDROC and
   enrichment factors match Vina's within its seed-to-seed noise.
 
+### Fixed
+- The `rmsd l.b.` and `rmsd u.b.` columns, in both the docking table and the
+  `REMARK VINA RESULT` lines, held the same number: one plain RMSD over
+  every atom, hydrogens included. They are now AutoDock Vina's two distinct
+  measures, ported from `model.cpp`: the upper bound pairs heavy atoms by
+  index, and the lower bound pairs each heavy atom with the nearest of the
+  same element, taking the larger of the two directions, so a symmetric
+  group that has rotated onto itself no longer counts as movement. On a
+  nine-mode Vina docking the two bounds now reproduce every value Vina
+  printed to within 0.0006 A, the precision of PDBQT coordinates
+  (`rmsd_bounds_match_vina`).
+- With `--flex`, the distances now cover the moving side chains as well as
+  the ligand, as Vina's do.
+
 ### Changed
 - `--receptor` may now come from the config file, so it is no longer
   required on the command line.
@@ -34,6 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   logs its seed, so it can be reproduced.
 - Several `--ligand` files with a single `--out` is now an error. rustdock
   docks each ligand on its own, so they would have overwritten each other.
+- **Breaking (library):** `DockingResult::rmsd` is replaced by `rmsd_lb` and
+  `rmsd_ub`, the two measures Vina reports. The new public `rmsd_bounds`
+  gives both for any two poses of a molecule, and `AtomType::element` gives
+  the `Element` that the lower bound matches atoms by.
 
 ## [0.3.0] - 2026-11-01
 

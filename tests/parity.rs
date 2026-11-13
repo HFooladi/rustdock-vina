@@ -5,6 +5,7 @@
 //! fast and always run; the docking test is `#[ignore]`d and run in release
 //! mode by CI: `cargo test --release --test parity -- --ignored`.
 
+use assert_approx_eq::assert_approx_eq;
 use nalgebra::Vector3;
 use rustdock_vina::forcefield::vina::VinaForceField;
 use rustdock_vina::forcefield::vinardo::VinardoForceField;
@@ -12,7 +13,7 @@ use rustdock_vina::forcefield::ForceField;
 use rustdock_vina::io::{parse_flex_pdbqt, parse_pdbqt};
 use rustdock_vina::optimization::monte_carlo::{MonteCarlo, MonteCarloParams};
 use rustdock_vina::scoring::{score_pose, score_pose_with_flex};
-use rustdock_vina::{FlexResidues, Molecule};
+use rustdock_vina::{rmsd_bounds, FlexResidues, Molecule};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -204,19 +205,10 @@ fn vina_poses_rescore() {
     check_scores(&VinaForceField::default(), "vina_top.pdbqt", "vina_top");
 }
 
-/// Heavy-atom RMSD in atom order, without superposition.
+/// Heavy-atom RMSD in atom order, without superposition: Vina's
+/// `rmsd u.b.`, which the library computes for a run's own modes.
 fn heavy_rmsd(a: &Molecule, b: &Molecule) -> f64 {
-    let heavy = |m: &Molecule| -> Vec<Vector3<f64>> {
-        m.atoms
-            .iter()
-            .filter(|atom| !atom.atom_type.is_hydrogen())
-            .map(|atom| atom.coordinates)
-            .collect()
-    };
-    let (a, b) = (heavy(a), heavy(b));
-    assert_eq!(a.len(), b.len(), "heavy atom counts differ");
-    let sum: f64 = a.iter().zip(&b).map(|(p, q)| (p - q).norm_squared()).sum();
-    (sum / a.len() as f64).sqrt()
+    rmsd_bounds(a, b).expect("heavy atom counts differ").1
 }
 
 /// Docking from an RDKit conformer finds the crystal pose, as Vina does.
@@ -335,4 +327,67 @@ fn flex_docking_matches_vina() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// rustdock's `rmsd l.b.` and `rmsd u.b.` are Vina's.
+///
+/// `vina_modes.pdbqt` is a nine-mode docking written by AutoDock Vina
+/// 1.2.7, so each mode's `REMARK VINA RESULT` carries the two distances
+/// Vina measured from its own best pose. Recomputing them from the poses
+/// in that file checks the measures alone, with no search in the way.
+#[test]
+fn rmsd_bounds_match_vina() {
+    let path = data_dir().join("5S8I_2LY").join("vina_modes.pdbqt");
+    let text = std::fs::read_to_string(&path).expect("read vina_modes.pdbqt");
+
+    // Vina's own numbers, and each mode as its own PDBQT for the parser.
+    let mut golden = Vec::new();
+    let mut models: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if line.starts_with("MODEL") {
+            models.push(String::new());
+        } else if let Some(rest) = line.strip_prefix("REMARK VINA RESULT:") {
+            let values: Vec<f64> = rest
+                .split_whitespace()
+                .map(|v| v.parse().expect("number in VINA RESULT"))
+                .collect();
+            golden.push((values[1], values[2]));
+        } else if let Some(model) = models.last_mut() {
+            model.push_str(line);
+            model.push('\n');
+        }
+    }
+    assert_eq!(models.len(), 9, "expected nine modes");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let poses: Vec<Molecule> = models
+        .iter()
+        .enumerate()
+        .map(|(i, model)| {
+            let file = dir.path().join(format!("mode{i}.pdbqt"));
+            std::fs::write(&file, model).expect("write mode");
+            parse_pdbqt(&file).unwrap_or_else(|e| panic!("mode {i}: {e}"))
+        })
+        .collect();
+
+    // Vina measures every mode against the best one.
+    let best = &poses[0];
+    for (i, pose) in poses.iter().enumerate() {
+        let (lb, ub) = rmsd_bounds(pose, best).expect("same atoms");
+        let (want_lb, want_ub) = golden[i];
+        // A PDBQT stores three decimals, so these poses are Vina's own
+        // rounded to 0.001 A. Recomputing from them lands within 0.0006 of
+        // every value Vina printed; a mistake in either measure (counting
+        // hydrogens, pairing atoms wrongly, one direction of the lower
+        // bound) moves it by far more.
+        assert_approx_eq!(lb, want_lb, 1e-3);
+        assert_approx_eq!(ub, want_ub, 1e-3);
+    }
+
+    // The fixture is only worth testing if the two measures differ, which
+    // they do wherever like atoms swap places.
+    assert!(
+        golden.iter().any(|(lb, ub)| ub - lb > 0.5),
+        "fixture has no mode where the bounds differ"
+    );
 }

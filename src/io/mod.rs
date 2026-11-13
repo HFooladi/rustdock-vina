@@ -627,11 +627,12 @@ pub fn write_docking_results<P: AsRef<Path>>(
 
     for (i, result) in results.iter().enumerate() {
         writeln!(file, "MODEL {}", i + 1)?;
-        let rmsd = result.rmsd.unwrap_or(0.0);
         writeln!(
             file,
             "REMARK VINA RESULT: {:9.3} {:10.3} {:10.3}",
-            result.energy, rmsd, rmsd
+            result.energy,
+            result.rmsd_lb.unwrap_or(0.0),
+            result.rmsd_ub.unwrap_or(0.0)
         )?;
         let component = |name: &str| {
             result
@@ -770,7 +771,8 @@ mod tests {
                 ("Intramolecular".to_string(), -0.5),
                 ("Unbound".to_string(), -0.5),
             ],
-            rmsd: None,
+            rmsd_lb: None,
+            rmsd_ub: None,
         };
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("docked.pdbqt");
@@ -1042,7 +1044,8 @@ ATOM   1954  N   THR A 222      28.499   2.529  55.204  1.00  0.00    -0.341 N
             molecule: ligand.clone(),
             flex: Some(flex.molecule.clone()),
             energy_components: Vec::new(),
-            rmsd: None,
+            rmsd_lb: None,
+            rmsd_ub: None,
         };
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("docked.pdbqt");
