@@ -342,13 +342,12 @@ fn main() -> Result<()> {
                 println!("     | (kcal/mol) | (A)      | (A)");
                 println!("-----+------------+----------+----------");
                 for (i, r) in filtered_results.iter().enumerate() {
-                    let rmsd = r.rmsd.unwrap_or(0.0);
                     println!(
                         "{:4} | {:10.3} | {:8.3} | {:8.3}",
                         i + 1,
                         r.energy,
-                        rmsd,
-                        rmsd
+                        r.rmsd_lb.unwrap_or(0.0),
+                        r.rmsd_ub.unwrap_or(0.0)
                     );
                 }
                 println!();

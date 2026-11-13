@@ -157,9 +157,18 @@ fn test_generate_multiple_poses() {
         );
     }
 
-    // All but the first should have RMSD
+    // All but the first should have both RMSD bounds, and the lower bound
+    // can never exceed the upper one.
     for result in results.iter().skip(1) {
-        assert!(result.rmsd.is_some(), "Non-first poses should have RMSD");
+        let (lb, ub) = (result.rmsd_lb, result.rmsd_ub);
+        assert!(
+            lb.is_some() && ub.is_some(),
+            "Non-first poses should have RMSD"
+        );
+        assert!(
+            lb.unwrap() <= ub.unwrap() + 1e-9,
+            "lower bound {lb:?} above upper bound {ub:?}"
+        );
     }
 }
 

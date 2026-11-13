@@ -47,8 +47,13 @@ pub struct DockingResult {
     /// Components of the energy (vdW, electrostatic, etc.)
     pub energy_components: Vec<(String, f64)>,
 
-    /// RMSD from the best mode (if multiple modes are generated)
-    pub rmsd: Option<f64>,
+    /// Symmetry-aware RMSD from the best mode, over heavy movable atoms
+    /// (Vina's `rmsd l.b.`); `None` for the best mode itself.
+    pub rmsd_lb: Option<f64>,
+
+    /// RMSD from the best mode pairing atoms by index (Vina's `rmsd u.b.`);
+    /// `None` for the best mode itself.
+    pub rmsd_ub: Option<f64>,
 }
 
 /// Trait for optimization algorithms

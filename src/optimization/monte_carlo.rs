@@ -7,6 +7,7 @@
 use nalgebra::Vector3;
 use rand::prelude::*;
 
+use crate::atom::{Atom, Element};
 use crate::forcefield::ForceField;
 use crate::grid::{pairwise_energy_and_gradient, GridSet, ReceptorGrids};
 use crate::molecule::{FlexResidues, Molecule};
@@ -230,8 +231,14 @@ impl MonteCarlo {
         // the rigid receptor and with each other is internal.
         let mut results = Vec::with_capacity(poses.len());
         let mut best_intra = None;
+        // Vina measures RMSD over the movable atoms: the ligand, then any
+        // flexible side chain, in the search's own order.
+        let movable_atoms = searcher.movable_atoms().to_vec();
+        let n_movable_atoms = movable_atoms.len();
+        let mut movable_coords: Vec<Vec<Vector3<f64>>> = Vec::with_capacity(poses.len());
         for pose in &poses {
             let coords = searcher.coords_of(&pose.conf);
+            movable_coords.push(coords[..n_movable_atoms].to_vec());
             let molecule = searcher.model.to_molecule(ligand, &pose.conf, &coords);
             let mut inter = intermolecular_energy(&molecule, &pruned, forcefield)?;
             let mut intra = searcher.intra_energy(&coords)?;
@@ -252,13 +259,16 @@ impl MonteCarlo {
                     ("Intramolecular".to_string(), intra),
                     ("Unbound".to_string(), reference),
                 ],
-                rmsd: None,
+                rmsd_lb: None,
+                rmsd_ub: None,
             });
         }
 
-        if let Some((first, rest)) = results.split_first_mut() {
-            for result in rest {
-                result.rmsd = Some(calculate_rmsd(&result.molecule, &first.molecule));
+        // Each mode's distance from the best one, as Vina reports it.
+        if let Some((first, rest)) = movable_coords.split_first() {
+            for (result, coords) in results.iter_mut().skip(1).zip(rest) {
+                result.rmsd_lb = Some(rmsd_lower_bound(&movable_atoms, coords, first));
+                result.rmsd_ub = Some(rmsd_upper_bound(&movable_atoms, coords, first));
             }
         }
         Ok(results)
@@ -514,28 +524,183 @@ fn ligand_radius(ligand: &Molecule) -> f64 {
 }
 
 /// Calculate root mean square deviation between two molecules
-fn calculate_rmsd(mol1: &Molecule, mol2: &Molecule) -> f64 {
-    if mol1.atoms.len() != mol2.atoms.len() {
-        return f64::MAX; // Different number of atoms
+/// Vina's two RMSD measures between two poses of the same molecule, as the
+/// `rmsd l.b.` and `rmsd u.b.` columns of a docking run report them.
+///
+/// The upper bound pairs atom `i` with atom `i`; the lower bound pairs each
+/// heavy atom with the nearest one of the same element, in whichever
+/// direction gives the larger value, so a symmetric group that has merely
+/// rotated onto itself does not count as movement. Hydrogens are left out
+/// of both. Returns `None` if the two poses do not hold the same atoms.
+///
+/// With flexible side chains, Vina measures over the side chains too; this
+/// compares the molecules it is given.
+pub fn rmsd_bounds(a: &Molecule, b: &Molecule) -> Option<(f64, f64)> {
+    if a.atoms.len() != b.atoms.len() {
+        return None;
     }
+    let coords = |m: &Molecule| -> Vec<Vector3<f64>> {
+        m.atoms.iter().map(|atom| atom.coordinates).collect()
+    };
+    let (x, y) = (coords(a), coords(b));
+    Some((
+        rmsd_lower_bound(&a.atoms, &x, &y),
+        rmsd_upper_bound(&a.atoms, &x, &y),
+    ))
+}
 
-    let mut sum_sq_diff = 0.0;
-
-    for i in 0..mol1.atoms.len() {
-        let pos1 = &mol1.atoms[i].coordinates;
-        let pos2 = &mol2.atoms[i].coordinates;
-
-        let diff = pos1 - pos2;
-        sum_sq_diff += diff.norm_squared();
+/// Vina's `rmsd_upper_bound`: heavy atoms paired by index.
+///
+/// `atoms` types both pose's coordinates, which are the search's movable
+/// atoms in one order: the ligand, then any flexible side chain.
+fn rmsd_upper_bound(atoms: &[Atom], a: &[Vector3<f64>], b: &[Vector3<f64>]) -> f64 {
+    let mut sum = 0.0;
+    let mut counted = 0usize;
+    for (i, atom) in atoms.iter().enumerate() {
+        if atom.atom_type.element() == Element::Hydrogen {
+            continue;
+        }
+        sum += (a[i] - b[i]).norm_squared();
+        counted += 1;
     }
+    if counted == 0 {
+        0.0
+    } else {
+        (sum / counted as f64).sqrt()
+    }
+}
 
-    (sum_sq_diff / mol1.atoms.len() as f64).sqrt()
+/// One direction of Vina's `rmsd_lower_bound`: every heavy atom of `a`
+/// against the nearest heavy atom of `b` of the same element.
+fn rmsd_lower_bound_asymmetric(atoms: &[Atom], a: &[Vector3<f64>], b: &[Vector3<f64>]) -> f64 {
+    let mut sum = 0.0;
+    let mut counted = 0usize;
+    for (i, atom) in atoms.iter().enumerate() {
+        let element = atom.atom_type.element();
+        if element == Element::Hydrogen {
+            continue;
+        }
+        let nearest = atoms
+            .iter()
+            .enumerate()
+            .filter(|(_, other)| {
+                let other = other.atom_type.element();
+                other == element && other != Element::Hydrogen
+            })
+            .map(|(j, _)| (a[i] - b[j]).norm_squared())
+            .fold(f64::INFINITY, f64::min);
+        // Unreachable while both poses hold the same atoms: `i` itself
+        // always matches. Vina asserts the same.
+        if nearest.is_finite() {
+            sum += nearest;
+            counted += 1;
+        }
+    }
+    if counted == 0 {
+        0.0
+    } else {
+        (sum / counted as f64).sqrt()
+    }
+}
+
+/// Vina's `rmsd_lower_bound`: the larger of the two directions, so that a
+/// pose cannot look close merely by crowding onto part of the other.
+///
+/// Matching each atom to the nearest of its element makes this blind to a
+/// symmetry that swaps like atoms, where the upper bound counts the swap
+/// as movement. Vina reports both.
+fn rmsd_lower_bound(atoms: &[Atom], a: &[Vector3<f64>], b: &[Vector3<f64>]) -> f64 {
+    rmsd_lower_bound_asymmetric(atoms, a, b).max(rmsd_lower_bound_asymmetric(atoms, b, a))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atom::AtomType;
     use std::collections::HashSet;
+
+    fn atom_at(atom_type: AtomType, x: f64, y: f64, z: f64) -> Atom {
+        Atom::new(
+            atom_type,
+            Vector3::new(x, y, z),
+            "A".to_string(),
+            1,
+            "LIG".to_string(),
+            1,
+            'A',
+            0.0,
+        )
+    }
+
+    /// Two carbons that have swapped places are the same pose to the lower
+    /// bound and a move to the upper one. This is the whole reason Vina
+    /// reports both, so the two must not be computed alike.
+    #[test]
+    fn swapping_like_atoms_separates_the_two_bounds() {
+        let atoms = [
+            atom_at(AtomType::Carbon, 0.0, 0.0, 0.0),
+            atom_at(AtomType::Carbon, 1.0, 0.0, 0.0),
+        ];
+        let a = vec![Vector3::new(0.0, 0.0, 0.0), Vector3::new(1.0, 0.0, 0.0)];
+        let b = vec![Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 0.0)];
+
+        assert_eq!(rmsd_lower_bound(&atoms, &a, &b), 0.0);
+        assert_eq!(rmsd_upper_bound(&atoms, &a, &b), 1.0);
+    }
+
+    /// Different elements cannot stand in for each other, so an oxygen
+    /// moving is a move by both measures.
+    #[test]
+    fn unlike_atoms_do_not_match_each_other() {
+        let atoms = [
+            atom_at(AtomType::Carbon, 0.0, 0.0, 0.0),
+            atom_at(AtomType::Oxygen, 1.0, 0.0, 0.0),
+        ];
+        let a = vec![Vector3::new(0.0, 0.0, 0.0), Vector3::new(1.0, 0.0, 0.0)];
+        let b = vec![Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 0.0)];
+
+        assert_eq!(rmsd_lower_bound(&atoms, &a, &b), 1.0);
+        assert_eq!(rmsd_upper_bound(&atoms, &a, &b), 1.0);
+    }
+
+    /// Vina measures over heavy atoms only; a hydrogen may move freely.
+    #[test]
+    fn hydrogens_are_left_out() {
+        let atoms = [
+            atom_at(AtomType::Carbon, 0.0, 0.0, 0.0),
+            atom_at(AtomType::HydrogenD, 1.0, 0.0, 0.0),
+        ];
+        let a = vec![Vector3::new(0.0, 0.0, 0.0), Vector3::new(1.0, 0.0, 0.0)];
+        let b = vec![Vector3::new(0.0, 0.0, 0.0), Vector3::new(9.0, 0.0, 0.0)];
+
+        assert_eq!(rmsd_upper_bound(&atoms, &a, &b), 0.0);
+        assert_eq!(rmsd_lower_bound(&atoms, &a, &b), 0.0);
+    }
+
+    /// The lower bound takes the worse direction, so a pose cannot look
+    /// close by crowding every atom onto one of the other's.
+    #[test]
+    fn the_lower_bound_takes_the_worse_direction() {
+        let atoms = [
+            atom_at(AtomType::Carbon, 0.0, 0.0, 0.0),
+            atom_at(AtomType::Carbon, 0.0, 0.0, 0.0),
+        ];
+        // Both of `b`'s atoms sit on the first of `a`'s.
+        let a = vec![Vector3::new(0.0, 0.0, 0.0), Vector3::new(4.0, 0.0, 0.0)];
+        let b = vec![Vector3::new(0.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 0.0)];
+
+        // a -> b: the second atom is 4 away; b -> a: both find an atom at 0.
+        assert_approx_eq::assert_approx_eq!(
+            rmsd_lower_bound_asymmetric(&atoms, &b, &a),
+            0.0,
+            1e-12
+        );
+        assert_approx_eq::assert_approx_eq!(
+            rmsd_lower_bound(&atoms, &a, &b),
+            (16.0f64 / 2.0).sqrt(),
+            1e-12
+        );
+    }
 
     /// Nearby master seeds must not share runs. With `master + run`, masters
     /// 0..16 over 8 runs produced only 23 distinct seeds out of 128.
