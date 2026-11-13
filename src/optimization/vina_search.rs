@@ -276,8 +276,11 @@ impl Model {
             // hydrogens and closure dummies, as Vina's `model::append`.
             let scored = |a: &Atom| !a.atom_type.is_hydrogen() && !a.atom_type.is_closure_dummy();
             for i in flex.movable() {
-                for j in 0..n_ligand {
-                    if scored(&flex.molecule.atoms[i]) && scored(&ligand.atoms[j]) {
+                if !scored(&flex.molecule.atoms[i]) {
+                    continue;
+                }
+                for (j, atom) in ligand.atoms.iter().enumerate() {
+                    if scored(atom) {
                         flex_pairs.push((j, index[i]));
                     }
                 }
