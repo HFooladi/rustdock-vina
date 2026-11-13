@@ -1,8 +1,8 @@
 //! Main executable for rustdock-vina
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
-use log::{error, info, warn};
+use clap::{Args, Parser, Subcommand};
+use log::{info, warn};
 use nalgebra::Vector3;
 use rayon::prelude::*;
 use rustdock_vina::forcefield::{
@@ -35,80 +35,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Dock a ligand to a receptor
-    Dock {
-        /// PDBQT file containing the receptor
-        #[clap(long, value_parser)]
-        receptor: PathBuf,
-
-        /// PDBQT file containing the ligand to dock
-        #[clap(long, value_parser)]
-        ligand: Vec<PathBuf>,
-
-        /// Flexible side chains (PDBQT of BEGIN_RES/END_RES blocks, as for
-        /// Vina's --flex); --receptor is then the rigid part. Their torsions
-        /// are searched with the ligand's and written after it in each mode
-        #[clap(long, value_parser)]
-        flex: Option<PathBuf>,
-
-        /// Configuration file for docking
-        #[clap(long, short, value_parser)]
-        config: Option<PathBuf>,
-
-        /// Center of the search box (x,y,z)
-        #[clap(long, value_parser, value_delimiter = ',')]
-        center: Option<Vec<f64>>,
-
-        /// Size of the search box (x,y,z)
-        #[clap(long, value_parser, value_delimiter = ',')]
-        size: Option<Vec<f64>>,
-
-        /// Scoring function to use (vina, ad4, vinardo)
-        #[clap(long, default_value = "vina")]
-        scoring: String,
-
-        /// Exhaustiveness of the search (higher values increase accuracy but take longer)
-        #[clap(long, default_value_t = 8)]
-        exhaustiveness: usize,
-
-        /// Number of binding modes to generate
-        #[clap(long, default_value_t = 9)]
-        num_modes: usize,
-
-        /// Output file for the docking results
-        #[clap(long, short, value_parser)]
-        out: Option<PathBuf>,
-
-        /// Ligands to screen, as PDBQT files or directories of them. They are
-        /// docked in parallel against one set of receptor grids; each one's
-        /// poses go to `--dir`, and `--dir`/scores.tsv lists every best
-        /// affinity. A ligand that fails is reported there and skipped.
-        #[clap(long, value_parser, num_args = 1..)]
-        batch: Vec<PathBuf>,
-
-        /// Output directory for the docking results (required with --batch)
-        #[clap(long, value_parser)]
-        dir: Option<PathBuf>,
-
-        /// Number of threads (default: all cores)
-        #[clap(long)]
-        cpu: Option<usize>,
-
-        /// Energy range for output poses (kcal/mol)
-        #[clap(long, default_value_t = 3.0)]
-        energy_range: f64,
-
-        /// Spacing of the precomputed affinity grids (Angstroms)
-        #[clap(long, default_value_t = 0.375)]
-        grid_spacing: f64,
-
-        /// Search on exact pairwise energies instead of precomputed grids (slow)
-        #[clap(long)]
-        no_grid: bool,
-
-        /// Random seed; the same seed and inputs reproduce the same poses
-        #[clap(long)]
-        seed: Option<u64>,
-    },
+    Dock(DockArgs),
 
     /// Score an existing pose
     Score {
@@ -131,6 +58,136 @@ enum Commands {
     },
 }
 
+/// Options of `rustdock dock`. Those with a default are `Option`s so that
+/// one left off the command line can come from `--config`.
+#[derive(Args, Debug)]
+struct DockArgs {
+    /// PDBQT file containing the receptor
+    #[clap(long, value_parser)]
+    receptor: Option<PathBuf>,
+
+    /// PDBQT file(s) containing the ligand to dock; each is docked on its
+    /// own
+    #[clap(long, value_parser, num_args = 1..)]
+    ligand: Vec<PathBuf>,
+
+    /// Flexible side chains (PDBQT of BEGIN_RES/END_RES blocks, as for
+    /// Vina's --flex); --receptor is then the rigid part. Their torsions
+    /// are searched with the ligand's and written after it in each mode
+    #[clap(long, value_parser)]
+    flex: Option<PathBuf>,
+
+    /// Vina configuration file: `key = value` lines naming any option
+    /// in Vina's spelling. Options on the command line take precedence
+    #[clap(long, short, value_parser)]
+    config: Option<PathBuf>,
+
+    /// Center of the search box (x,y,z)
+    #[clap(
+        long,
+        value_parser,
+        value_delimiter = ',',
+        allow_negative_numbers = true
+    )]
+    center: Option<Vec<f64>>,
+
+    /// Center of the search box, X (Angstrom)
+    #[clap(
+        long,
+        visible_alias = "center_x",
+        allow_negative_numbers = true,
+        conflicts_with = "center"
+    )]
+    center_x: Option<f64>,
+
+    /// Center of the search box, Y (Angstrom)
+    #[clap(
+        long,
+        visible_alias = "center_y",
+        allow_negative_numbers = true,
+        conflicts_with = "center"
+    )]
+    center_y: Option<f64>,
+
+    /// Center of the search box, Z (Angstrom)
+    #[clap(
+        long,
+        visible_alias = "center_z",
+        allow_negative_numbers = true,
+        conflicts_with = "center"
+    )]
+    center_z: Option<f64>,
+
+    /// Size of the search box (x,y,z)
+    #[clap(long, value_parser, value_delimiter = ',')]
+    size: Option<Vec<f64>>,
+
+    /// Size of the search box, X (Angstrom)
+    #[clap(long, visible_alias = "size_x", conflicts_with = "size")]
+    size_x: Option<f64>,
+
+    /// Size of the search box, Y (Angstrom)
+    #[clap(long, visible_alias = "size_y", conflicts_with = "size")]
+    size_y: Option<f64>,
+
+    /// Size of the search box, Z (Angstrom)
+    #[clap(long, visible_alias = "size_z", conflicts_with = "size")]
+    size_z: Option<f64>,
+
+    /// Scoring function to use (vina, ad4, vinardo) [default: vina]
+    #[clap(long)]
+    scoring: Option<String>,
+
+    /// Exhaustiveness of the search (higher values increase accuracy but
+    /// take longer) [default: 8]
+    #[clap(long)]
+    exhaustiveness: Option<usize>,
+
+    /// Number of binding modes to generate [default: 9]
+    #[clap(long, visible_alias = "num_modes")]
+    num_modes: Option<usize>,
+
+    /// Minimum heavy-atom RMSD between output modes (Angstrom) [default: 1]
+    #[clap(long, visible_alias = "min_rmsd")]
+    min_rmsd: Option<f64>,
+
+    /// Output file for the docking results
+    #[clap(long, short, value_parser)]
+    out: Option<PathBuf>,
+
+    /// Ligands to screen, as PDBQT files or directories of them. They are
+    /// docked in parallel against one set of receptor grids; each one's
+    /// poses go to `--dir`, and `--dir`/scores.tsv lists every best
+    /// affinity. A ligand that fails is reported there and skipped.
+    #[clap(long, value_parser, num_args = 1..)]
+    batch: Vec<PathBuf>,
+
+    /// Output directory for the docking results (required with --batch)
+    #[clap(long, value_parser)]
+    dir: Option<PathBuf>,
+
+    /// Number of threads; 0 uses all cores [default: 0]
+    #[clap(long)]
+    cpu: Option<usize>,
+
+    /// Energy range for output poses (kcal/mol) [default: 3]
+    #[clap(long, visible_alias = "energy_range")]
+    energy_range: Option<f64>,
+
+    /// Spacing of the precomputed affinity grids (Angstroms) [default: 0.375]
+    #[clap(long, visible_alias = "spacing")]
+    grid_spacing: Option<f64>,
+
+    /// Search on exact pairwise energies instead of precomputed grids (slow)
+    #[clap(long)]
+    no_grid: bool,
+
+    /// Random seed; the same seed and inputs reproduce the same poses.
+    /// 0 draws a random seed and prints it, as Vina does [default: 0]
+    #[clap(long)]
+    seed: Option<u64>,
+}
+
 fn main() -> Result<()> {
     // Default to `info` so a run is not silent. Previously every progress
     // message was suppressed unless the user happened to know to set RUST_LOG,
@@ -143,25 +200,38 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Dock {
-            receptor,
-            ligand,
-            flex,
-            config,
-            center,
-            size,
-            scoring,
-            exhaustiveness,
-            num_modes,
-            out,
-            batch,
-            dir,
-            cpu,
-            energy_range,
-            grid_spacing,
-            no_grid,
-            seed,
-        } => {
+        Commands::Dock(args) => {
+            let config = match &args.config {
+                Some(path) => {
+                    let text = std::fs::read_to_string(path).with_context(|| {
+                        format!("Failed to read config file: {}", path.display())
+                    })?;
+                    parse_config(&text).with_context(|| {
+                        format!("Failed to parse config file: {}", path.display())
+                    })?
+                }
+                None => VinaConfig::default(),
+            };
+            let DockSettings {
+                receptor,
+                ligands,
+                batch,
+                flex,
+                out,
+                dir,
+                scoring,
+                center,
+                size: box_size,
+                exhaustiveness,
+                num_modes,
+                min_rmsd,
+                energy_range,
+                grid_spacing,
+                no_grid,
+                cpu,
+                seed,
+            } = resolve(args, config)?;
+
             // Determine scoring function
             let forcefield = select_forcefield(&scoring)?;
 
@@ -175,49 +245,14 @@ fn main() -> Result<()> {
             }
 
             let batch = expand_batch(&batch)?;
-            if ligand.is_empty() && batch.is_empty() {
-                return Err(anyhow::anyhow!(
-                    "no ligand given: pass at least one --ligand FILE or --batch FILE/DIR"
-                ));
-            }
-            if !batch.is_empty() && dir.is_none() {
-                return Err(anyhow::anyhow!("--batch needs an output --dir"));
+            if ligands.is_empty() && batch.is_empty() {
+                return Err(anyhow::anyhow!("--batch found no .pdbqt ligands"));
             }
 
-            // Parse configuration
-            let (center, box_size) = match (center, size, config) {
-                (Some(c), Some(s), _) if c.len() == 3 && s.len() == 3 => {
-                    let center = Vector3::new(c[0], c[1], c[2]);
-                    let box_size = Vector3::new(s[0], s[1], s[2]);
-                    (center, box_size)
-                }
-                (Some(c), _, _) if c.len() != 3 => {
-                    return Err(anyhow::anyhow!(
-                        "--center needs exactly 3 comma-separated values, got {}",
-                        c.len()
-                    ));
-                }
-                (_, Some(sz), _) if sz.len() != 3 => {
-                    return Err(anyhow::anyhow!(
-                        "--size needs exactly 3 comma-separated values, got {}",
-                        sz.len()
-                    ));
-                }
-                (_, _, Some(config_path)) => {
-                    // Parse configuration file
-                    let config_str = std::fs::read_to_string(&config_path).with_context(|| {
-                        format!("Failed to read config file: {}", config_path.display())
-                    })?;
-
-                    parse_config(&config_str)?
-                }
-                _ => {
-                    error!("Either center and size or a config file must be provided");
-                    return Err(anyhow::anyhow!(
-                        "Either center and size or a config file must be provided"
-                    ));
-                }
-            };
+            // As Vina, draw a seed when none is given and print it, so that
+            // any run can be reproduced.
+            let seed = seed.unwrap_or_else(|| rand::random::<u64>().max(1));
+            info!("Seed: {seed}");
 
             info!(
                 "Search box center: ({}, {}, {})",
@@ -244,7 +279,8 @@ fn main() -> Result<()> {
                 exhaustiveness,
                 use_grid: !no_grid,
                 grid_spacing,
-                seed,
+                seed: Some(seed),
+                min_rmsd,
                 ..MonteCarloParams::default()
             });
             // Every ligand shares one set of receptor grids.
@@ -277,16 +313,19 @@ fn main() -> Result<()> {
             };
 
             // Process each ligand
-            for ligand_path in ligand {
-                // Determine output path
-                let output_path = if let Some(out_path) = &out {
-                    out_path.clone()
-                } else if let Some(dir_path) = &dir {
-                    let ligand_name = ligand_path.file_stem().unwrap().to_string_lossy();
-                    dir_path.join(format!("{}_out.pdbqt", ligand_name))
-                } else {
-                    let ligand_stem = ligand_path.file_stem().unwrap().to_string_lossy();
-                    PathBuf::from(format!("{}_out.pdbqt", ligand_stem))
+            for ligand_path in ligands {
+                // Output path: --out, else --dir/<stem>_out.pdbqt, else
+                // Vina's default beside the ligand.
+                let output_path = match (&out, &dir) {
+                    (Some(out_path), _) => out_path.clone(),
+                    (None, Some(dir_path)) => {
+                        let stem = ligand_path
+                            .file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy();
+                        dir_path.join(format!("{stem}_out.pdbqt"))
+                    }
+                    (None, None) => default_output(&ligand_path),
                 };
 
                 info!(
@@ -423,55 +462,296 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Parse center and box size from a configuration file
-fn parse_config(config_str: &str) -> Result<(Vector3<f64>, Vector3<f64>)> {
-    let mut center_x = None;
-    let mut center_y = None;
-    let mut center_z = None;
-    let mut size_x = None;
-    let mut size_y = None;
-    let mut size_z = None;
+/// Options read from a Vina configuration file. Every field is optional:
+/// the command line takes precedence, then this file, then Vina's defaults.
+#[derive(Debug, Default, PartialEq)]
+struct VinaConfig {
+    receptor: Option<PathBuf>,
+    ligand: Vec<PathBuf>,
+    batch: Vec<PathBuf>,
+    flex: Option<PathBuf>,
+    out: Option<PathBuf>,
+    dir: Option<PathBuf>,
+    scoring: Option<String>,
+    center: [Option<f64>; 3],
+    size: [Option<f64>; 3],
+    exhaustiveness: Option<usize>,
+    num_modes: Option<usize>,
+    min_rmsd: Option<f64>,
+    energy_range: Option<f64>,
+    spacing: Option<f64>,
+    cpu: Option<usize>,
+    seed: Option<i64>,
+}
 
-    for line in config_str.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
+/// Vina options rustdock does not implement, with Vina 1.2.7's default.
+/// A config file may set one to its default; any other value is an error,
+/// because ignoring it would change the result.
+const UNSUPPORTED_WITH_DEFAULT: &[(&str, f64)] = &[
+    ("max_evals", 0.0),
+    ("weight_gauss1", -0.035579),
+    ("weight_gauss2", -0.005156),
+    ("weight_repulsion", 0.840245),
+    ("weight_hydrophobic", -0.035069),
+    ("weight_hydrogen", -0.587439),
+    ("weight_rot", 0.05846),
+    ("weight_vinardo_gauss1", -0.045),
+    ("weight_vinardo_repulsion", 0.8),
+    ("weight_vinardo_hydrophobic", -0.035),
+    ("weight_vinardo_hydrogen", -0.6),
+    ("weight_vinardo_rot", 0.05846),
+    ("weight_ad4_vdw", 0.1662),
+    ("weight_ad4_hb", 0.1209),
+    ("weight_ad4_elec", 0.1406),
+    ("weight_ad4_dsolv", 0.1322),
+    ("weight_ad4_rot", 0.2983),
+    ("weight_glue", 50.0),
+];
 
-        let parts: Vec<&str> = line.splitn(2, '=').collect();
-        if parts.len() != 2 {
-            continue;
-        }
+/// Vina switches rustdock does not implement; `false` is accepted.
+const UNSUPPORTED_SWITCHES: &[&str] = &[
+    "score_only",
+    "local_only",
+    "autobox",
+    "randomize_only",
+    "no_refine",
+    "force_even_voxels",
+];
 
-        let key = parts[0].trim();
-        let value = parts[1].trim();
-
-        match key {
-            "center_x" => center_x = Some(value.parse::<f64>()?),
-            "center_y" => center_y = Some(value.parse::<f64>()?),
-            "center_z" => center_z = Some(value.parse::<f64>()?),
-            "size_x" => size_x = Some(value.parse::<f64>()?),
-            "size_y" => size_y = Some(value.parse::<f64>()?),
-            "size_z" => size_z = Some(value.parse::<f64>()?),
-            // A real Vina config also carries receptor/ligand/out/exhaustiveness/
-            // num_modes/cpu/seed. None of those are honoured here, so say so
-            // rather than silently running with defaults.
-            other => warn!(
-                "ignoring unsupported config key {other:?}: only center_x/y/z \
-                 and size_x/y/z are recognised"
-            ),
+/// Read a Vina configuration file as Vina 1.2.7 (Boost.Program_options)
+/// does: `key = value` lines, `#` to the end of a line is a comment, an
+/// unknown key or a key given twice is an error, and `ligand` / `batch`
+/// lines accumulate.
+fn parse_config(config_str: &str) -> Result<VinaConfig> {
+    fn num<T: std::str::FromStr>(key: &str, value: &str) -> Result<T> {
+        value
+            .parse()
+            .map_err(|_| anyhow::anyhow!("{key}: {value:?} is not a valid number"))
+    }
+    fn switch(key: &str, value: &str) -> Result<bool> {
+        match value.to_ascii_lowercase().as_str() {
+            "" | "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            _ => Err(anyhow::anyhow!("{key}: {value:?} is not true or false")),
         }
     }
 
-    // Check if all values are present
-    match (center_x, center_y, center_z, size_x, size_y, size_z) {
-        (Some(cx), Some(cy), Some(cz), Some(sx), Some(sy), Some(sz)) => {
-            Ok((Vector3::new(cx, cy, cz), Vector3::new(sx, sy, sz)))
+    let mut config = VinaConfig::default();
+    let mut seen = HashSet::new();
+    for (index, raw) in config_str.lines().enumerate() {
+        let line = raw.split('#').next().unwrap_or_default().trim();
+        if line.is_empty() {
+            continue;
         }
-        _ => Err(anyhow::anyhow!(
-            "Missing configuration values for center or box size"
-        )),
+        let at = || format!("config line {}", index + 1);
+        let (key, value) = line
+            .split_once('=')
+            .map(|(k, v)| (k.trim(), v.trim()))
+            .ok_or_else(|| anyhow::anyhow!("{}: expected `key = value`", at()))?;
+        if key != "ligand" && key != "batch" && !seen.insert(key.to_string()) {
+            return Err(anyhow::anyhow!("{}: {key} is set twice", at()));
+        }
+        let path = || PathBuf::from(value);
+        let result: Result<()> = (|| {
+            match key {
+                "receptor" => config.receptor = Some(path()),
+                "ligand" => config.ligand.push(path()),
+                "batch" => config.batch.push(path()),
+                "flex" => config.flex = Some(path()),
+                "out" => config.out = Some(path()),
+                "dir" => config.dir = Some(path()),
+                "scoring" => config.scoring = Some(value.to_string()),
+                "center_x" => config.center[0] = Some(num(key, value)?),
+                "center_y" => config.center[1] = Some(num(key, value)?),
+                "center_z" => config.center[2] = Some(num(key, value)?),
+                "size_x" => config.size[0] = Some(num(key, value)?),
+                "size_y" => config.size[1] = Some(num(key, value)?),
+                "size_z" => config.size[2] = Some(num(key, value)?),
+                "exhaustiveness" => config.exhaustiveness = Some(num(key, value)?),
+                "num_modes" => config.num_modes = Some(num(key, value)?),
+                "min_rmsd" => config.min_rmsd = Some(num(key, value)?),
+                "energy_range" => config.energy_range = Some(num(key, value)?),
+                "spacing" => config.spacing = Some(num(key, value)?),
+                "cpu" => config.cpu = Some(num(key, value)?),
+                "seed" => config.seed = Some(num(key, value)?),
+                "verbosity" => {
+                    if value != "1" {
+                        warn!("ignoring verbosity = {value}; set RUST_LOG instead");
+                    }
+                }
+                _ => {
+                    if let Some((_, default)) =
+                        UNSUPPORTED_WITH_DEFAULT.iter().find(|(k, _)| *k == key)
+                    {
+                        if num::<f64>(key, value)? != *default {
+                            return Err(anyhow::anyhow!(
+                                "{key} is not supported by rustdock; only Vina's \
+                                 default ({default}) is accepted"
+                            ));
+                        }
+                    } else if UNSUPPORTED_SWITCHES.contains(&key) {
+                        if switch(key, value)? {
+                            return Err(anyhow::anyhow!("{key} is not supported by rustdock"));
+                        }
+                    } else if matches!(key, "maps" | "write_maps" | "unbound_energy") {
+                        return Err(anyhow::anyhow!("{key} is not supported by rustdock"));
+                    } else {
+                        return Err(anyhow::anyhow!("unknown option {key:?}"));
+                    }
+                }
+            }
+            Ok(())
+        })();
+        result.with_context(at)?;
     }
+    Ok(config)
+}
+
+/// Every `dock` option after merging the command line, the config file and
+/// Vina 1.2.7's defaults.
+#[derive(Debug, PartialEq)]
+struct DockSettings {
+    receptor: PathBuf,
+    ligands: Vec<PathBuf>,
+    batch: Vec<PathBuf>,
+    flex: Option<PathBuf>,
+    out: Option<PathBuf>,
+    dir: Option<PathBuf>,
+    scoring: String,
+    center: Vector3<f64>,
+    size: Vector3<f64>,
+    exhaustiveness: usize,
+    num_modes: usize,
+    min_rmsd: f64,
+    energy_range: f64,
+    grid_spacing: f64,
+    no_grid: bool,
+    /// `None` uses every core (Vina's `cpu = 0`).
+    cpu: Option<usize>,
+    /// `None` draws a random seed (Vina's `seed = 0`).
+    seed: Option<u64>,
+}
+
+/// One box vector (`--center` or `--size`): the comma form, else the
+/// per-axis flags, each axis falling back to the config file.
+fn box_vector(
+    name: &str,
+    joined: Option<Vec<f64>>,
+    axes: [Option<f64>; 3],
+    config: [Option<f64>; 3],
+) -> Result<Vector3<f64>> {
+    let axes = match joined {
+        Some(v) if v.len() == 3 => [Some(v[0]), Some(v[1]), Some(v[2])],
+        Some(v) => {
+            return Err(anyhow::anyhow!(
+                "--{name} needs exactly 3 comma-separated values, got {}",
+                v.len()
+            ))
+        }
+        None => axes,
+    };
+    let mut out = Vector3::zeros();
+    let mut missing = Vec::new();
+    for (i, axis) in ["x", "y", "z"].iter().enumerate() {
+        match axes[i].or(config[i]) {
+            Some(value) => out[i] = value,
+            None => missing.push(format!("{name}_{axis}")),
+        }
+    }
+    if !missing.is_empty() {
+        return Err(anyhow::anyhow!(
+            "search box incomplete, missing {}: pass --center and --size, or \
+             set center_x/y/z and size_x/y/z in a --config file",
+            missing.join(", ")
+        ));
+    }
+    Ok(out)
+}
+
+/// Merge `args` with `config`; the command line wins, as in Vina.
+fn resolve(args: DockArgs, config: VinaConfig) -> Result<DockSettings> {
+    let receptor = args.receptor.or(config.receptor).ok_or_else(|| {
+        anyhow::anyhow!("no receptor: pass --receptor FILE or set receptor in the --config file")
+    })?;
+    // To Boost, `ligand` is one multi-valued option, so a list on the
+    // command line replaces the config file's rather than adding to it.
+    let ligands = if args.ligand.is_empty() {
+        config.ligand
+    } else {
+        args.ligand
+    };
+    let batch = if args.batch.is_empty() {
+        config.batch
+    } else {
+        args.batch
+    };
+    let out = args.out.or(config.out);
+    let dir = args.dir.or(config.dir);
+    if ligands.is_empty() && batch.is_empty() {
+        return Err(anyhow::anyhow!(
+            "no ligand given: pass at least one --ligand FILE or --batch FILE/DIR"
+        ));
+    }
+    if !batch.is_empty() && dir.is_none() {
+        return Err(anyhow::anyhow!("--batch needs an output --dir"));
+    }
+    if ligands.len() > 1 && out.is_some() {
+        // Vina docks several --ligand files together into one --out;
+        // rustdock docks each on its own, so one --out cannot hold them.
+        return Err(anyhow::anyhow!(
+            "--out takes one ligand; rustdock docks each --ligand on its own, \
+             so give --dir (or no --out) for {} ligands",
+            ligands.len()
+        ));
+    }
+
+    let center = box_vector(
+        "center",
+        args.center,
+        [args.center_x, args.center_y, args.center_z],
+        config.center,
+    )?;
+    let size = box_vector(
+        "size",
+        args.size,
+        [args.size_x, args.size_y, args.size_z],
+        config.size,
+    )?;
+
+    Ok(DockSettings {
+        receptor,
+        ligands,
+        batch,
+        flex: args.flex.or(config.flex),
+        out,
+        dir,
+        scoring: args
+            .scoring
+            .or(config.scoring)
+            .unwrap_or_else(|| "vina".to_string()),
+        center,
+        size,
+        exhaustiveness: args.exhaustiveness.or(config.exhaustiveness).unwrap_or(8),
+        num_modes: args.num_modes.or(config.num_modes).unwrap_or(9),
+        min_rmsd: args.min_rmsd.or(config.min_rmsd).unwrap_or(1.0),
+        energy_range: args.energy_range.or(config.energy_range).unwrap_or(3.0),
+        grid_spacing: args.grid_spacing.or(config.spacing).unwrap_or(0.375),
+        no_grid: args.no_grid,
+        cpu: args.cpu.or(config.cpu).filter(|&n| n != 0),
+        // Vina's seed is an `int`; a negative one is kept as its bits.
+        seed: args
+            .seed
+            .or(config.seed.map(|s| s as u64))
+            .filter(|&s| s != 0),
+    })
+}
+
+/// Vina's default output for `ligand`: its path with a trailing `.pdbqt`
+/// removed and `_out.pdbqt` added, so it sits next to the input.
+fn default_output(ligand: &Path) -> PathBuf {
+    let name = ligand.to_string_lossy();
+    let stem = name.strip_suffix(".pdbqt").unwrap_or(&name);
+    PathBuf::from(format!("{stem}_out.pdbqt"))
 }
 
 /// Warn about flexible side-chain atoms outside the search box.
@@ -664,4 +944,192 @@ fn run_batch(job: &DockJob, ligands: &[PathBuf], dir: &Path) -> Result<()> {
         summary.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parse `dock` arguments as the binary would.
+    fn dock_args(argv: &[&str]) -> DockArgs {
+        let cli = Cli::try_parse_from(["rustdock", "dock"].iter().chain(argv)).unwrap();
+        match cli.command {
+            Commands::Dock(args) => args,
+            other => panic!("not dock: {other:?}"),
+        }
+    }
+
+    const VINA_CONFIG: &str = "\
+# A config file as written for AutoDock Vina 1.2.7
+receptor = rec.pdbqt
+ligand = lig.pdbqt   # trailing comment
+
+center_x = 1.5
+center_y = -2
+center_z = 3
+size_x = 20
+size_y = 22
+size_z = 24
+exhaustiveness = 16
+num_modes = 20
+energy_range = 4
+min_rmsd = 2
+seed = 7
+cpu = 0
+spacing = 0.5
+scoring = vinardo
+out = poses.pdbqt
+verbosity = 1
+max_evals = 0
+weight_gauss1 = -0.035579
+score_only = false
+";
+
+    #[test]
+    fn a_vina_config_runs_unchanged() {
+        let settings = resolve(dock_args(&[]), parse_config(VINA_CONFIG).unwrap()).unwrap();
+        assert_eq!(
+            settings,
+            DockSettings {
+                receptor: "rec.pdbqt".into(),
+                ligands: vec!["lig.pdbqt".into()],
+                batch: vec![],
+                flex: None,
+                out: Some("poses.pdbqt".into()),
+                dir: None,
+                scoring: "vinardo".into(),
+                center: Vector3::new(1.5, -2.0, 3.0),
+                size: Vector3::new(20.0, 22.0, 24.0),
+                exhaustiveness: 16,
+                num_modes: 20,
+                min_rmsd: 2.0,
+                energy_range: 4.0,
+                grid_spacing: 0.5,
+                no_grid: false,
+                cpu: None,
+                seed: Some(7),
+            }
+        );
+    }
+
+    #[test]
+    fn the_command_line_wins_over_the_config() {
+        let args = dock_args(&[
+            "--ligand",
+            "a.pdbqt",
+            "--center_x",
+            "-9",
+            "--exhaustiveness",
+            "32",
+            "--num_modes",
+            "3",
+            "--spacing",
+            "0.4",
+            "--seed",
+            "0",
+            "--out",
+            "x.pdbqt",
+        ]);
+        let s = resolve(args, parse_config(VINA_CONFIG).unwrap()).unwrap();
+        assert_eq!(s.ligands, vec![PathBuf::from("a.pdbqt")]);
+        assert_eq!(s.center, Vector3::new(-9.0, -2.0, 3.0));
+        assert_eq!((s.exhaustiveness, s.num_modes), (32, 3));
+        assert_eq!(s.grid_spacing, 0.4);
+        assert_eq!(s.seed, None, "seed 0 draws a random seed, as in Vina");
+        assert_eq!(s.out, Some(PathBuf::from("x.pdbqt")));
+        assert_eq!(s.receptor, PathBuf::from("rec.pdbqt"));
+    }
+
+    #[test]
+    fn defaults_are_vinas() {
+        let args = dock_args(&[
+            "--receptor",
+            "r.pdbqt",
+            "--ligand",
+            "l.pdbqt",
+            "--center",
+            "0,0,0",
+            "--size",
+            "20,20,20",
+        ]);
+        let s = resolve(args, VinaConfig::default()).unwrap();
+        assert_eq!(s.scoring, "vina");
+        assert_eq!((s.exhaustiveness, s.num_modes), (8, 9));
+        assert_eq!(
+            (s.min_rmsd, s.energy_range, s.grid_spacing),
+            (1.0, 3.0, 0.375)
+        );
+        assert_eq!((s.cpu, s.seed), (None, None));
+    }
+
+    #[test]
+    fn config_errors_name_the_line() {
+        let cases = [
+            ("bogus = 1", "unknown option"),
+            ("seed = 1\nseed = 2", "set twice"),
+            ("center_x", "expected `key = value`"),
+            ("size_x = big", "not a valid number"),
+            ("local_only = true", "not supported"),
+            ("weight_gauss1 = -0.1", "only Vina's default"),
+            ("maps = rec", "not supported"),
+            ("config = other.txt", "unknown option"),
+        ];
+        for (text, expected) in cases {
+            let err = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(err.contains("config line"), "{text}: {err}");
+            assert!(err.contains(expected), "{text}: {err}");
+        }
+    }
+
+    #[test]
+    fn ligand_lines_accumulate() {
+        let config = parse_config("ligand = a.pdbqt\nligand = b.pdbqt").unwrap();
+        assert_eq!(
+            config.ligand,
+            vec![PathBuf::from("a.pdbqt"), "b.pdbqt".into()]
+        );
+    }
+
+    #[test]
+    fn incomplete_box_names_the_missing_axes() {
+        let args = dock_args(&["--receptor", "r", "--ligand", "l", "--center", "0,0,0"]);
+        let err = resolve(args, parse_config("size_x = 20").unwrap()).unwrap_err();
+        assert!(err.to_string().contains("size_y, size_z"), "{err}");
+    }
+
+    #[test]
+    fn one_out_cannot_hold_several_ligands() {
+        let args = dock_args(&[
+            "--receptor",
+            "r",
+            "--ligand",
+            "a",
+            "b",
+            "--center",
+            "0,0,0",
+            "--size",
+            "9,9,9",
+            "--out",
+            "o.pdbqt",
+        ]);
+        assert!(resolve(args, VinaConfig::default()).is_err());
+    }
+
+    #[test]
+    fn center_and_center_x_conflict() {
+        let argv = ["rustdock", "dock", "--center", "0,0,0", "--center_x", "1"];
+        assert!(Cli::try_parse_from(argv).is_err());
+    }
+
+    #[test]
+    fn default_output_is_beside_the_ligand() {
+        assert_eq!(
+            default_output(Path::new("dir/lig.pdbqt")),
+            PathBuf::from("dir/lig_out.pdbqt")
+        );
+        assert_eq!(
+            default_output(Path::new("lig.mol")),
+            PathBuf::from("lig.mol_out.pdbqt")
+        );
+    }
 }

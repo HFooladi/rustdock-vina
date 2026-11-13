@@ -98,8 +98,8 @@ benchmark/screening/      # DUDE-Z virtual-screening parity vs AutoDock Vina (AU
 
 ## Gotchas
 
-- Config files use `key = value` format (not TOML/YAML). Only `center_x/y/z` and `size_x/y/z` keys are recognized.
+- Config files use Vina's `key = value` format (not TOML/YAML), parsed in `src/main.rs` (`parse_config` -> `VinaConfig`, merged with the command line by `resolve`). A Vina 1.2.7 config runs unchanged; the command line overrides it, and an unknown/unsupported key is an error, not a warning. Unimplemented Vina options are listed in `UNSUPPORTED_WITH_DEFAULT` / `UNSUPPORTED_SWITCHES`.
 - Float comparisons in tests use `assert_approx_eq` crate, not raw `==`.
-- The `--center` and `--size` CLI flags use comma-separated values (e.g., `0,0,0`), not spaces.
+- The `--center` and `--size` CLI flags use comma-separated values (e.g., `0,0,0`), not spaces; Vina's per-axis `--center_x`/`--size_x` also work, and conflict with the comma form.
 - Port Vina behaviour from its source (ccsb-scripps/AutoDock-Vina, tag v1.2.7), not from memory: defaults can be overridden elsewhere (e.g. `monte_carlo.h` sets `hunt_cap` (10, 1.5, 10), but `vina.cpp` docks with (10, 10, 10)).
 - With `--flex`, each residue's ROOT (CA) and the first atom of each branch off it (CB) are fixed, as in Vina; `--receptor` must be the rigid part without the side chains.
