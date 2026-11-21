@@ -147,9 +147,14 @@ complexes. Single-seed reports (seed 42) with every complex are also in
 - **PDBQT is the only input format.** There is no preparation step, so
   prepare inputs with Meeko, ADFR or MGLTools.
 - **Not every Vina option is implemented.** A config file or command line
-  may set any option listed below; `--score_only`, `--local_only`,
-  `--autobox`, `--randomize_only`, `--maps` and the `--weight_*` overrides
-  are not supported, and are reported rather than ignored.
+  may set any option listed below; `--local_only`, `--randomize_only`,
+  `--maps` and the `--weight_*` overrides are not supported, and are
+  reported rather than ignored.
+- **`--score_only --flex` affinities differ from Vina's** by about
+  0.25 kcal/mol: Vina takes the unbound system's energy from its grids while
+  reporting the bound internal energy exactly, so the two do not cancel.
+  Every individual term matches. Passing Vina `--unbound_energy` with the
+  internal energy it prints reproduces rustdock's affinity.
 
 ## Installation
 
@@ -202,6 +207,8 @@ All `dock` options:
 | `--seed <N>` | Random seed; `0` draws one and prints it, as in Vina | random |
 | `--grid-spacing <A>`, `--spacing` | Spacing of the precomputed affinity grids | `0.375` |
 | `--no-grid` | Search on exact pairwise energies (slow) | |
+| `--score_only` | Score the ligand where it stands, no search; the box may be left out | |
+| `--autobox` | Take the box from the ligand, with Vina's 4 Å padding (only with `--score_only`) | |
 
 ### Flexible side chains
 

@@ -11,8 +11,8 @@ use rustdock_vina::forcefield::{
 use rustdock_vina::io::{parse_flex_pdbqt, parse_pdbqt, write_docking_results};
 use rustdock_vina::optimization::monte_carlo::{MonteCarlo, MonteCarloParams, Target};
 use rustdock_vina::optimization::DockingResult;
-use rustdock_vina::scoring::score_pose_with_flex;
-use rustdock_vina::FlexResidues;
+use rustdock_vina::scoring::{ligand_internal_energy, score_pose_with_flex};
+use rustdock_vina::{FlexResidues, Molecule};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -182,6 +182,16 @@ struct DockArgs {
     #[clap(long)]
     no_grid: bool,
 
+    /// Score the ligand where it stands and print the breakdown, without
+    /// searching; the search box may be left out
+    #[clap(long, visible_alias = "score_only")]
+    score_only: bool,
+
+    /// Take the search box from the ligand's own extent, with Vina's 4 A of
+    /// padding (only with --score_only)
+    #[clap(long)]
+    autobox: bool,
+
     /// Random seed; the same seed and inputs reproduce the same poses.
     /// 0 draws a random seed and prints it, as Vina does [default: 0]
     #[clap(long)]
@@ -221,7 +231,9 @@ fn main() -> Result<()> {
                 dir,
                 scoring,
                 center,
-                size: box_size,
+                size,
+                score_only,
+                autobox,
                 exhaustiveness,
                 num_modes,
                 min_rmsd,
@@ -249,6 +261,64 @@ fn main() -> Result<()> {
                 return Err(anyhow::anyhow!("--batch found no .pdbqt ligands"));
             }
 
+            // Parse receptor
+            info!("Loading receptor: {}", receptor.display());
+            let receptor_molecule = parse_pdbqt(&receptor).with_context(|| {
+                format!("Failed to parse receptor file: {}", receptor.display())
+            })?;
+
+            // Scoring a pose needs no search, no grids and no box.
+            if score_only {
+                let flex_residues = flex
+                    .as_ref()
+                    .map(|path| load_flex(path, &receptor_molecule))
+                    .transpose()?;
+                if flex_residues.is_some() {
+                    // Vina's own --score_only takes the unbound system's
+                    // energy from the grids while reporting the bound
+                    // internal energy exactly, so the two do not cancel and
+                    // its affinity sits a little apart from this one. Every
+                    // term below still matches.
+                    warn!(
+                        "with --flex, Vina's --score_only affinity differs from this one: it \
+                         takes the unbound system's energy from its grids, so (2) and (4) do \
+                         not cancel. Pass Vina --unbound_energy with the internal energy it \
+                         prints to compare them."
+                    );
+                }
+                for ligand_path in ligands.iter().chain(&batch) {
+                    info!("Loading ligand: {}", ligand_path.display());
+                    let ligand = parse_pdbqt(ligand_path).with_context(|| {
+                        format!("Failed to parse ligand file: {}", ligand_path.display())
+                    })?;
+                    if autobox {
+                        let (center, size) = autobox_of(&ligand);
+                        info!("Grid center: ligand center (autobox)");
+                        info!(
+                            "Grid size  : X {} Y {} Z {} (autobox)",
+                            size.x, size.y, size.z
+                        );
+                        let _ = center;
+                    }
+                    if ligands.len() + batch.len() > 1 {
+                        println!("\n{}", ligand_path.display());
+                    }
+                    show_score(
+                        &ligand,
+                        &receptor_molecule,
+                        flex_residues.as_ref(),
+                        forcefield.as_ref(),
+                    )?;
+                }
+                return Ok(());
+            }
+
+            // A search needs a box; `resolve` has already insisted on one.
+            let (center, box_size) = match (center, size) {
+                (Some(center), Some(size)) => (center, size),
+                _ => return Err(anyhow::anyhow!("docking needs --center and --size")),
+            };
+
             // As Vina, draw a seed when none is given and print it, so that
             // any run can be reproduced.
             let seed = seed.unwrap_or_else(|| rand::random::<u64>().max(1));
@@ -262,12 +332,6 @@ fn main() -> Result<()> {
                 "Search box size: ({}, {}, {})",
                 box_size.x, box_size.y, box_size.z
             );
-
-            // Parse receptor
-            info!("Loading receptor: {}", receptor.display());
-            let receptor_molecule = parse_pdbqt(&receptor).with_context(|| {
-                format!("Failed to parse receptor file: {}", receptor.display())
-            })?;
 
             // Create optimizer
             if !no_grid && !(grid_spacing.is_finite() && grid_spacing > 0.0) {
@@ -481,6 +545,8 @@ struct VinaConfig {
     spacing: Option<f64>,
     cpu: Option<usize>,
     seed: Option<i64>,
+    score_only: Option<bool>,
+    autobox: Option<bool>,
 }
 
 /// Vina options rustdock does not implement, with Vina 1.2.7's default.
@@ -509,9 +575,7 @@ const UNSUPPORTED_WITH_DEFAULT: &[(&str, f64)] = &[
 
 /// Vina switches rustdock does not implement; `false` is accepted.
 const UNSUPPORTED_SWITCHES: &[&str] = &[
-    "score_only",
     "local_only",
-    "autobox",
     "randomize_only",
     "no_refine",
     "force_even_voxels",
@@ -573,6 +637,8 @@ fn parse_config(config_str: &str) -> Result<VinaConfig> {
                 "spacing" => config.spacing = Some(num(key, value)?),
                 "cpu" => config.cpu = Some(num(key, value)?),
                 "seed" => config.seed = Some(num(key, value)?),
+                "score_only" => config.score_only = Some(switch(key, value)?),
+                "autobox" => config.autobox = Some(switch(key, value)?),
                 "verbosity" => {
                     if value != "1" {
                         warn!("ignoring verbosity = {value}; set RUST_LOG instead");
@@ -617,8 +683,13 @@ struct DockSettings {
     out: Option<PathBuf>,
     dir: Option<PathBuf>,
     scoring: String,
-    center: Vector3<f64>,
-    size: Vector3<f64>,
+    /// `None` only with `score_only`, which needs no box.
+    center: Option<Vector3<f64>>,
+    size: Option<Vector3<f64>>,
+    /// Score the ligand as given, without searching.
+    score_only: bool,
+    /// Take the box from the ligand (Vina's `--autobox`).
+    autobox: bool,
     exhaustiveness: usize,
     num_modes: usize,
     min_rmsd: f64,
@@ -704,18 +775,37 @@ fn resolve(args: DockArgs, config: VinaConfig) -> Result<DockSettings> {
         ));
     }
 
-    let center = box_vector(
+    let score_only = args.score_only || config.score_only.unwrap_or(false);
+    let autobox = args.autobox || config.autobox.unwrap_or(false);
+    if autobox && !score_only {
+        // Vina computes an autobox only for --score_only and --local_only;
+        // for a real search it would quietly use an undefined box.
+        return Err(anyhow::anyhow!(
+            "--autobox only applies to --score_only; give --center and --size to dock"
+        ));
+    }
+
+    // A search needs a box. Scoring a pose does not, so let it go without
+    // one rather than demanding six numbers that nothing reads.
+    let (center, size) = match box_vector(
         "center",
         args.center,
         [args.center_x, args.center_y, args.center_z],
         config.center,
-    )?;
-    let size = box_vector(
-        "size",
-        args.size,
-        [args.size_x, args.size_y, args.size_z],
-        config.size,
-    )?;
+    )
+    .and_then(|center| {
+        let size = box_vector(
+            "size",
+            args.size,
+            [args.size_x, args.size_y, args.size_z],
+            config.size,
+        )?;
+        Ok((center, size))
+    }) {
+        Ok((center, size)) => (Some(center), Some(size)),
+        Err(_) if score_only => (None, None),
+        Err(e) => return Err(e),
+    };
 
     Ok(DockSettings {
         receptor,
@@ -730,6 +820,8 @@ fn resolve(args: DockArgs, config: VinaConfig) -> Result<DockSettings> {
             .unwrap_or_else(|| "vina".to_string()),
         center,
         size,
+        score_only,
+        autobox,
         exhaustiveness: args.exhaustiveness.or(config.exhaustiveness).unwrap_or(8),
         num_modes: args.num_modes.or(config.num_modes).unwrap_or(9),
         min_rmsd: args.min_rmsd.or(config.min_rmsd).unwrap_or(1.0),
@@ -751,6 +843,99 @@ fn default_output(ligand: &Path) -> PathBuf {
     let name = ligand.to_string_lossy();
     let stem = name.strip_suffix(".pdbqt").unwrap_or(&name);
     PathBuf::from(format!("{stem}_out.pdbqt"))
+}
+
+/// Parse a `--flex` PDBQT against the rigid receptor it belongs to.
+fn load_flex(path: &Path, receptor: &Molecule) -> Result<FlexResidues> {
+    info!("Loading flexible residues: {}", path.display());
+    parse_flex_pdbqt(path, receptor)
+        .with_context(|| format!("Failed to parse flex residue file: {}", path.display()))
+}
+
+/// Vina's `--autobox`: the box that holds `ligand` with 4 A to spare.
+///
+/// As `Vina::grid_dimensions_from_ligand`, the centre is the mean of every
+/// atom's coordinates -- hydrogens included -- and each side is the furthest
+/// atom from that centre along the axis, plus the padding, doubled and
+/// rounded up to a whole Angstrom.
+fn autobox_of(ligand: &Molecule) -> (Vector3<f64>, Vector3<f64>) {
+    /// Vina's `buffer_size`.
+    const PADDING: f64 = 4.0;
+
+    let n = ligand.atoms.len();
+    if n == 0 {
+        return (Vector3::zeros(), Vector3::repeat((PADDING * 2.0).ceil()));
+    }
+    let center = ligand
+        .atoms
+        .iter()
+        .map(|atom| atom.coordinates)
+        .sum::<Vector3<f64>>()
+        / n as f64;
+    let mut reach: Vector3<f64> = Vector3::zeros();
+    for atom in &ligand.atoms {
+        for axis in 0..3 {
+            reach[axis] = reach[axis].max((center[axis] - atom.coordinates[axis]).abs());
+        }
+    }
+    let size = Vector3::from_iterator(reach.iter().map(|r| ((r + PADDING) * 2.0).ceil()));
+    (center, size)
+}
+
+/// A pose's energies in the layout of Vina's `--score_only`: its
+/// `show_score`, term for term.
+///
+/// The affinity is `(1) + (2) + (3) - (4)`. rustdock scores the unbound
+/// system as the bound pose's own internal energy, so (2) and (4) cancel
+/// and the affinity is the normalized intermolecular energy. Vina agrees on
+/// a rigid receptor; with `--flex` it computes (4) from the grids while
+/// reporting (2) exactly, so its affinity differs by the gap between the
+/// two (see [`score_pose_with_flex`]).
+fn score_lines(
+    ligand: &Molecule,
+    receptor: &Molecule,
+    flex: Option<&FlexResidues>,
+    forcefield: &dyn ForceField,
+) -> Result<Vec<String>> {
+    let score = score_pose_with_flex(ligand, receptor, flex, forcefield)?;
+    let ligand_internal = ligand_internal_energy(ligand, forcefield)?;
+
+    let intermolecular = score.intermolecular;
+    let internal = ligand_internal + score.flex_receptor + score.flex_flex;
+    // What the force field's torsional normalization took off.
+    let torsional = score.affinity - intermolecular;
+    let unbound = internal;
+
+    let line = |label: &str, value: f64| format!("{label:<35}: {value:.3} (kcal/mol)");
+    Ok(vec![
+        format!(
+            "{:<35}: {:.3} (kcal/mol) [=(1)+(2)+(3)-(4)]",
+            "Estimated Free Energy of Binding", score.affinity
+        ),
+        line("(1) Final Intermolecular Energy", intermolecular),
+        line("    Ligand - Receptor", intermolecular - score.ligand_flex),
+        line("    Ligand - Flex side chains", score.ligand_flex),
+        line("(2) Final Total Internal Energy", internal),
+        line("    Ligand", ligand_internal),
+        line("    Flex   - Receptor", score.flex_receptor),
+        line("    Flex   - Flex side chains", score.flex_flex),
+        line("(3) Torsional Free Energy", torsional),
+        line("(4) Unbound System's Energy", unbound),
+    ])
+}
+
+/// Print [`score_lines`].
+fn show_score(
+    ligand: &Molecule,
+    receptor: &Molecule,
+    flex: Option<&FlexResidues>,
+    forcefield: &dyn ForceField,
+) -> Result<()> {
+    println!();
+    for line in score_lines(ligand, receptor, flex, forcefield)? {
+        println!("{line}");
+    }
+    Ok(())
 }
 
 /// Warn about flexible side-chain atoms outside the search box.
@@ -948,6 +1133,7 @@ fn run_batch(job: &DockJob, ligands: &[PathBuf], dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustdock_vina::forcefield::vina::VinaForceField;
 
     /// Parse `dock` arguments as the binary would.
     fn dock_args(argv: &[&str]) -> DockArgs {
@@ -997,8 +1183,10 @@ score_only = false
                 out: Some("poses.pdbqt".into()),
                 dir: None,
                 scoring: "vinardo".into(),
-                center: Vector3::new(1.5, -2.0, 3.0),
-                size: Vector3::new(20.0, 22.0, 24.0),
+                center: Some(Vector3::new(1.5, -2.0, 3.0)),
+                size: Some(Vector3::new(20.0, 22.0, 24.0)),
+                score_only: false,
+                autobox: false,
                 exhaustiveness: 16,
                 num_modes: 20,
                 min_rmsd: 2.0,
@@ -1031,7 +1219,7 @@ score_only = false
         ]);
         let s = resolve(args, parse_config(VINA_CONFIG).unwrap()).unwrap();
         assert_eq!(s.ligands, vec![PathBuf::from("a.pdbqt")]);
-        assert_eq!(s.center, Vector3::new(-9.0, -2.0, 3.0));
+        assert_eq!(s.center, Some(Vector3::new(-9.0, -2.0, 3.0)));
         assert_eq!((s.exhaustiveness, s.num_modes), (32, 3));
         assert_eq!(s.grid_spacing, 0.4);
         assert_eq!(s.seed, None, "seed 0 draws a random seed, as in Vina");
@@ -1118,6 +1306,132 @@ score_only = false
     fn center_and_center_x_conflict() {
         let argv = ["rustdock", "dock", "--center", "0,0,0", "--center_x", "1"];
         assert!(Cli::try_parse_from(argv).is_err());
+    }
+
+    #[test]
+    fn score_only_needs_no_search_box() {
+        let args = dock_args(&["--receptor", "r", "--ligand", "l", "--score_only"]);
+        let s = resolve(args, VinaConfig::default()).unwrap();
+        assert!(s.score_only);
+        assert_eq!((s.center, s.size), (None, None));
+
+        // Docking still insists on one.
+        let args = dock_args(&["--receptor", "r", "--ligand", "l"]);
+        assert!(resolve(args, VinaConfig::default()).is_err());
+    }
+
+    #[test]
+    fn autobox_only_applies_to_score_only() {
+        let args = dock_args(&["--receptor", "r", "--ligand", "l", "--autobox"]);
+        let err = resolve(args, VinaConfig::default()).unwrap_err();
+        assert!(err.to_string().contains("--score_only"), "{err}");
+
+        let args = dock_args(&[
+            "--receptor",
+            "r",
+            "--ligand",
+            "l",
+            "--autobox",
+            "--score_only",
+        ]);
+        let s = resolve(args, VinaConfig::default()).unwrap();
+        assert!(s.autobox && s.score_only);
+    }
+
+    #[test]
+    fn a_config_may_ask_for_score_only() {
+        let config = parse_config("score_only = yes\nautobox = 1").unwrap();
+        let s = resolve(dock_args(&["--receptor", "r", "--ligand", "l"]), config).unwrap();
+        assert!(s.score_only && s.autobox);
+        // Vina still rejects what rustdock cannot do.
+        assert!(parse_config("local_only = true").is_err());
+    }
+
+    /// Vina's `grid_dimensions_from_ligand`: the mean of every atom, and
+    /// each side the furthest reach plus 4 A, doubled and rounded up.
+    #[test]
+    fn autobox_holds_the_ligand_with_padding() {
+        let mut molecule = Molecule::new("lig");
+        for (x, y, z) in [(0.0, 0.0, 0.0), (4.0, 1.0, 0.0), (2.0, -1.0, 0.5)] {
+            molecule.add_atom(rustdock_vina::Atom::new(
+                rustdock_vina::AtomType::Carbon,
+                Vector3::new(x, y, z),
+                "C".to_string(),
+                1,
+                "LIG".to_string(),
+                1,
+                'A',
+                0.0,
+            ));
+        }
+        let (center, size) = autobox_of(&molecule);
+        assert_approx_eq::assert_approx_eq!(center.x, 2.0, 1e-12);
+        assert_approx_eq::assert_approx_eq!(center.y, 0.0, 1e-12);
+        // Reach 2.0 in x, 1.0 in y, 0.333 in z: (reach + 4) * 2, rounded up.
+        assert_eq!(size, Vector3::new(12.0, 10.0, 9.0));
+
+        // Every atom must sit inside the box it produced.
+        for atom in &molecule.atoms {
+            for axis in 0..3 {
+                assert!((atom.coordinates[axis] - center[axis]).abs() <= size[axis] / 2.0);
+            }
+        }
+    }
+
+    /// The breakdown is Vina's `show_score`, line for line, and its own
+    /// arithmetic holds: the affinity is (1) + (2) + (3) - (4).
+    #[test]
+    fn the_breakdown_is_vinas() {
+        let data = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("test_data");
+        let receptor = parse_pdbqt(data.join("receptor.pdbqt")).unwrap();
+        let ligand = parse_pdbqt(data.join("ligand.pdbqt")).unwrap();
+        let forcefield = VinaForceField::default();
+        let lines = score_lines(&ligand, &receptor, None, &forcefield).unwrap();
+
+        let labels: Vec<&str> = lines
+            .iter()
+            .map(|l| l.split(':').next().unwrap().trim_end())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Estimated Free Energy of Binding",
+                "(1) Final Intermolecular Energy",
+                "    Ligand - Receptor",
+                "    Ligand - Flex side chains",
+                "(2) Final Total Internal Energy",
+                "    Ligand",
+                "    Flex   - Receptor",
+                "    Flex   - Flex side chains",
+                "(3) Torsional Free Energy",
+                "(4) Unbound System's Energy",
+            ]
+        );
+
+        let value = |i: usize| -> f64 {
+            lines[i]
+                .split(':')
+                .nth(1)
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap()
+        };
+        // [=(1)+(2)+(3)-(4)], as the first line claims.
+        assert_approx_eq::assert_approx_eq!(
+            value(0),
+            value(1) + value(4) + value(8) - value(9),
+            2e-3
+        );
+        // Without flexible side chains their terms are zero, and the
+        // internal energy is the ligand's alone.
+        assert_eq!((value(3), value(6), value(7)), (0.0, 0.0, 0.0));
+        assert_approx_eq::assert_approx_eq!(value(4), value(5), 1e-12);
+        assert_approx_eq::assert_approx_eq!(value(2), value(1), 1e-12);
     }
 
     #[test]
