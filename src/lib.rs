@@ -76,7 +76,7 @@ pub use molecule::{Bond, FlexResidues, Molecule, MoleculeError, Torsion};
 pub use optimization::monte_carlo::{rmsd_bounds, MonteCarlo, MonteCarloParams};
 pub use optimization::{DockingResult, OptimizationError, Optimizer};
 pub use scoring::vina_score::VinaScore;
-pub use scoring::{score_pose, score_pose_with_flex, PoseScore};
+pub use scoring::{ligand_internal_energy, score_pose, score_pose_with_flex, PoseScore};
 
 /// Version of the library, sourced from `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

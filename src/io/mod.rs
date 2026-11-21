@@ -108,6 +108,9 @@ pub fn parse_pdbqt<P: AsRef<Path>>(path: P) -> Result<Molecule, IoError> {
     // be assigned once bonds exist.
     molecule.assign_xs_types();
 
+    // Which pairs Vina scores within the ligand depends on these.
+    (molecule.body_of, molecule.body_axis) = fragments.bodies(molecule.atoms.len());
+
     Ok(molecule)
 }
 
@@ -203,21 +206,15 @@ pub fn parse_flex_pdbqt<P: AsRef<Path>>(
     // Vina's rigid bodies: a branch's first atom lies on its rotation axis,
     // so it moves with the parent's body, not its own. The ROOT's body,
     // with the first atom of every branch off it, never moves.
-    let body_of: Vec<usize> = (0..molecule.atoms.len())
-        .map(|i| {
-            let f = fragments.of[i];
-            match fragments.parent[f] {
-                Some(parent) if fragments.first[f] == Some(i) => fragments.of[parent],
-                _ => f,
-            }
-        })
-        .collect();
+    let (body_of, axis) = fragments.bodies(molecule.atoms.len());
+    molecule.body_of = body_of.clone();
+    molecule.body_axis = axis.clone();
     let mut flex = FlexResidues {
         fixed: body_of.iter().map(|&b| b == 0).collect(),
         molecule,
         residue_of,
         body_of,
-        axis: fragments.parent.into_iter().zip(fragments.first).collect(),
+        axis,
     };
     type_flex_atoms(&mut flex, rigid);
     Ok(flex)
@@ -271,6 +268,10 @@ fn type_flex_atoms(flex: &mut FlexResidues, rigid: &Molecule) {
     flex.molecule.bonds = combined.bonds;
 }
 
+/// A torsion tree's rigid bodies: the body of each atom, and each body's
+/// rotation axis (the atom it hangs from, and its own first atom).
+type Bodies = (Vec<usize>, Vec<(Option<usize>, Option<usize>)>);
+
 /// The rigid fragments of a torsion tree, which decide which atoms can bond
 /// and which pairs can move relative to each other.
 struct Fragments {
@@ -285,6 +286,31 @@ struct Fragments {
 }
 
 impl Fragments {
+    /// Vina's rigid bodies for the atoms read so far: the body of each atom,
+    /// and each body's rotation axis.
+    ///
+    /// A branch's first atom lies on its rotation axis, so it moves with the
+    /// parent's body rather than its own, as in Vina's `postprocess_branch`
+    /// (the branch's `immobile_atom` is inserted into the parent node).
+    fn bodies(&self, atoms: usize) -> Bodies {
+        let body_of = (0..atoms)
+            .map(|i| {
+                let f = self.of[i];
+                match self.parent[f] {
+                    Some(parent) if self.first[f] == Some(i) => self.of[parent],
+                    _ => f,
+                }
+            })
+            .collect();
+        let axis = self
+            .parent
+            .iter()
+            .copied()
+            .zip(self.first.iter().copied())
+            .collect();
+        (body_of, axis)
+    }
+
     /// Whether atoms `a` and `b` cannot move relative to each other: they
     /// are in the same fragment, or one is the atom the other's fragment
     /// hangs from.

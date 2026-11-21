@@ -13,7 +13,7 @@ use rustdock_vina::forcefield::ForceField;
 use rustdock_vina::io::{parse_flex_pdbqt, parse_pdbqt};
 use rustdock_vina::optimization::monte_carlo::{MonteCarlo, MonteCarloParams};
 use rustdock_vina::scoring::{score_pose, score_pose_with_flex};
-use rustdock_vina::{rmsd_bounds, FlexResidues, Molecule};
+use rustdock_vina::{ligand_internal_energy, rmsd_bounds, FlexResidues, Molecule};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -329,6 +329,72 @@ fn flex_docking_matches_vina() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// One docked mode of `vina_modes.pdbqt`, with the numbers Vina printed for
+/// it: the two RMSD bounds and the internal energy.
+struct ModeRemarks {
+    rmsd_lb: f64,
+    rmsd_ub: f64,
+    intra: f64,
+}
+
+/// The nine modes of `5S8I_2LY/vina_modes.pdbqt`, a docking written by
+/// AutoDock Vina 1.2.7, each parsed back into a `Molecule` beside the
+/// remarks Vina wrote for that pose. Checking against these tests a
+/// measurement on its own, with no search in the way.
+fn vina_modes() -> Vec<(Molecule, ModeRemarks)> {
+    let path = data_dir().join("5S8I_2LY").join("vina_modes.pdbqt");
+    let text = std::fs::read_to_string(&path).expect("read vina_modes.pdbqt");
+
+    let numbers = |rest: &str| -> Vec<f64> {
+        rest.split_whitespace()
+            .map(|v| v.parse().expect("number in a REMARK"))
+            .collect()
+    };
+
+    let mut models: Vec<String> = Vec::new();
+    let mut remarks: Vec<ModeRemarks> = Vec::new();
+    for line in text.lines() {
+        if line.starts_with("MODEL") {
+            models.push(String::new());
+            remarks.push(ModeRemarks {
+                rmsd_lb: f64::NAN,
+                rmsd_ub: f64::NAN,
+                intra: f64::NAN,
+            });
+        } else if let Some(rest) = line.strip_prefix("REMARK VINA RESULT:") {
+            let values = numbers(rest);
+            let mode = remarks.last_mut().expect("REMARK before MODEL");
+            (mode.rmsd_lb, mode.rmsd_ub) = (values[1], values[2]);
+        } else if let Some(rest) = line.strip_prefix("REMARK INTRA:") {
+            remarks.last_mut().expect("REMARK before MODEL").intra = numbers(rest)[0];
+        } else if let Some(model) = models.last_mut() {
+            // `REMARK INTER + INTRA` and the rest are the molecule's own
+            // records; the parser keeps them for a round trip.
+            model.push_str(line);
+            model.push('\n');
+        }
+    }
+    assert_eq!(models.len(), 9, "expected nine modes");
+
+    // The parser reads one model per file, so give each its own.
+    let dir = tempfile::tempdir().expect("tempdir");
+    models
+        .iter()
+        .zip(remarks)
+        .enumerate()
+        .map(|(i, (model, mode))| {
+            assert!(
+                !mode.rmsd_lb.is_nan() && !mode.intra.is_nan(),
+                "mode {i} is missing a remark"
+            );
+            let file = dir.path().join(format!("mode{i}.pdbqt"));
+            std::fs::write(&file, model).expect("write mode");
+            let pose = parse_pdbqt(&file).unwrap_or_else(|e| panic!("mode {i}: {e}"));
+            (pose, mode)
+        })
+        .collect()
+}
+
 /// rustdock's `rmsd l.b.` and `rmsd u.b.` are Vina's.
 ///
 /// `vina_modes.pdbqt` is a nine-mode docking written by AutoDock Vina
@@ -337,57 +403,94 @@ fn flex_docking_matches_vina() {
 /// in that file checks the measures alone, with no search in the way.
 #[test]
 fn rmsd_bounds_match_vina() {
-    let path = data_dir().join("5S8I_2LY").join("vina_modes.pdbqt");
-    let text = std::fs::read_to_string(&path).expect("read vina_modes.pdbqt");
-
-    // Vina's own numbers, and each mode as its own PDBQT for the parser.
-    let mut golden = Vec::new();
-    let mut models: Vec<String> = Vec::new();
-    for line in text.lines() {
-        if line.starts_with("MODEL") {
-            models.push(String::new());
-        } else if let Some(rest) = line.strip_prefix("REMARK VINA RESULT:") {
-            let values: Vec<f64> = rest
-                .split_whitespace()
-                .map(|v| v.parse().expect("number in VINA RESULT"))
-                .collect();
-            golden.push((values[1], values[2]));
-        } else if let Some(model) = models.last_mut() {
-            model.push_str(line);
-            model.push('\n');
-        }
-    }
-    assert_eq!(models.len(), 9, "expected nine modes");
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let poses: Vec<Molecule> = models
-        .iter()
-        .enumerate()
-        .map(|(i, model)| {
-            let file = dir.path().join(format!("mode{i}.pdbqt"));
-            std::fs::write(&file, model).expect("write mode");
-            parse_pdbqt(&file).unwrap_or_else(|e| panic!("mode {i}: {e}"))
-        })
-        .collect();
-
+    let modes = vina_modes();
     // Vina measures every mode against the best one.
-    let best = &poses[0];
-    for (i, pose) in poses.iter().enumerate() {
+    let best = &modes[0].0;
+    for (i, (pose, golden)) in modes.iter().enumerate() {
         let (lb, ub) = rmsd_bounds(pose, best).expect("same atoms");
-        let (want_lb, want_ub) = golden[i];
         // A PDBQT stores three decimals, so these poses are Vina's own
         // rounded to 0.001 A. Recomputing from them lands within 0.0006 of
         // every value Vina printed; a mistake in either measure (counting
         // hydrogens, pairing atoms wrongly, one direction of the lower
         // bound) moves it by far more.
-        assert_approx_eq!(lb, want_lb, 1e-3);
-        assert_approx_eq!(ub, want_ub, 1e-3);
+        assert_approx_eq!(lb, golden.rmsd_lb, 1e-3);
+        assert_approx_eq!(ub, golden.rmsd_ub, 1e-3);
+        let _ = i;
     }
 
     // The fixture is only worth testing if the two measures differ, which
     // they do wherever like atoms swap places.
     assert!(
-        golden.iter().any(|(lb, ub)| ub - lb > 0.5),
+        modes.iter().any(|(_, g)| g.rmsd_ub - g.rmsd_lb > 0.5),
         "fixture has no mode where the bounds differ"
     );
+}
+
+/// The ligand's internal energy is Vina's.
+///
+/// Each mode of `vina_modes.pdbqt` carries the `REMARK INTRA` that Vina
+/// 1.2.7 computed for that very pose, so this checks the pair list and the
+/// energy alone, with no search in the way. Vina counts only pairs whose
+/// atoms can move relative to each other; counting the rest adds a constant
+/// that cancels out of the affinity but corrupts this number.
+#[test]
+fn ligand_internal_energy_matches_vina() {
+    let forcefield = VinaForceField::default();
+    for (i, (pose, golden)) in vina_modes().iter().enumerate() {
+        let intra = ligand_internal_energy(pose, &forcefield).expect("score");
+        // Within 0.00022 of every value Vina printed, which is PDBQT's
+        // three decimals. Counting the pairs inside one rigid body, whose
+        // distance never changes, put this 0.078 out on this ligand.
+        assert_approx_eq!(intra, golden.intra, 1e-3);
+        assert!(
+            golden.intra.abs() > 1e-9,
+            "mode {i} has no internal energy to compare"
+        );
+    }
+}
+
+/// Every pair the mobility rule drops really does hold a fixed distance.
+///
+/// The nine modes of `vina_modes.pdbqt` are the same ligand at different
+/// torsion angles, chosen by Vina's own search, so a pair whose distance is
+/// equal in all of them cannot be moved by any torsion. This checks the
+/// rigid bodies that [`Molecule::variable`] reads against data that knows
+/// nothing about how rustdock derived them: a wrong body assignment would
+/// drop a pair that the torsions do move.
+#[test]
+fn dropped_intra_pairs_never_move() {
+    let modes = vina_modes();
+    let reference = &modes[0].0;
+    let n = reference.atoms.len();
+
+    let mut dropped = 0usize;
+    for a in 0..n {
+        for b in (a + 1)..n {
+            if reference.variable(a, b) {
+                continue;
+            }
+            let distance = |m: &Molecule| (m.atoms[a].coordinates - m.atoms[b].coordinates).norm();
+            let first = distance(reference);
+            for (pose, _) in &modes {
+                // Coordinates are stored to three decimals, so allow the
+                // rounding of two of them.
+                assert_approx_eq!(distance(pose), first, 2e-3);
+            }
+            dropped += 1;
+        }
+    }
+    assert!(dropped > 0, "no pair was dropped, so nothing was checked");
+
+    // And the converse: the torsions do move something, so the fixture is
+    // not nine copies of one pose.
+    let moved = (0..n)
+        .flat_map(|a| ((a + 1)..n).map(move |b| (a, b)))
+        .filter(|&(a, b)| reference.variable(a, b))
+        .any(|(a, b)| {
+            let distance = |m: &Molecule| (m.atoms[a].coordinates - m.atoms[b].coordinates).norm();
+            modes
+                .iter()
+                .any(|(pose, _)| (distance(pose) - distance(reference)).abs() > 0.1)
+        });
+    assert!(moved, "no variable pair changed distance across the modes");
 }
