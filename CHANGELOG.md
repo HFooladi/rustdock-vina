@@ -8,10 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `rustdock dock --score_only` scores the ligand where it stands and prints
+  AutoDock Vina's ten-line breakdown, label for label, so a script that reads
+  Vina's output keeps working. The search box may be left out, since nothing
+  reads it. On a rigid receptor every line matches Vina 1.2.7 to 0.001
+  kcal/mol. With `--flex`, Vina takes the unbound system's energy from its
+  grids while reporting the bound internal energy exactly, so its affinity
+  sits about 0.25 kcal/mol from this one and rustdock says so; every other
+  line still matches. (`rustdock score` keeps its own layout.)
+- `--autobox` takes the search box from the ligand's extent with Vina's 4 A
+  of padding, as `Vina::grid_dimensions_from_ligand`. As in Vina it applies
+  only to `--score_only`.
 - A configuration file written for AutoDock Vina 1.2.7 now runs unchanged.
   `--config` reads every `dock` option in Vina's spelling (`receptor`,
   `ligand`, `batch`, `flex`, `out`, `dir`, `scoring`, `exhaustiveness`,
-  `num_modes`, `min_rmsd`, `energy_range`, `spacing`, `cpu`, `seed`), not
+  `num_modes`, `min_rmsd`, `energy_range`, `spacing`, `cpu`, `seed`,
+  `score_only`, `autobox`), not
   just the search box, and the command line overrides it as Boost does. An
   unknown key, a key set twice, or an option rustdock does not implement is
   an error naming the line, rather than a silently different run.
