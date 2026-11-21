@@ -638,6 +638,25 @@ pub fn write_pdbqt<P: AsRef<Path>>(molecule: &Molecule, path: P) -> Result<(), I
     write_molecule_records(&mut file, molecule)
 }
 
+/// Write one pose as a plain PDBQT, as Vina's `write_pose` does for
+/// `--local_only`: the ligand's own records and then any moved side
+/// chains, with no `MODEL` wrapper and no score remarks.
+///
+/// Vina refuses to read a single-pose file that carries `MODEL` tags, so a
+/// minimized pose written this way can be fed straight back to it. Use
+/// [`write_docking_results`] for a docking run's modes.
+pub fn write_pose<P: AsRef<Path>>(
+    result: &crate::optimization::DockingResult,
+    path: P,
+) -> Result<(), IoError> {
+    let mut file = File::create(path)?;
+    write_molecule_records(&mut file, &result.molecule)?;
+    if let Some(flex) = &result.flex {
+        write_molecule_records(&mut file, flex)?;
+    }
+    Ok(())
+}
+
 /// Write docking results as a multi-model PDBQT file in Vina's layout.
 ///
 /// Each model carries Vina's score remarks (`VINA RESULT` with the affinity
@@ -756,6 +775,40 @@ fn with_coordinates(line: &str, p: &Vector3<f64>) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// Vina rejects a one-pose file that carries MODEL tags, so
+    /// `write_pose` must not write them -- nor the score remarks, which
+    /// Vina's own `write_pose` leaves out.
+    #[test]
+    fn write_pose_is_a_plain_pdbqt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pose.pdbqt");
+        let molecule = parse_pdbqt(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("test_data")
+                .join("ligand.pdbqt"),
+        )
+        .unwrap();
+        let result = crate::optimization::DockingResult {
+            energy: -7.25,
+            molecule,
+            flex: None,
+            energy_components: vec![("Intermolecular".to_string(), -7.25)],
+            rmsd_lb: None,
+            rmsd_ub: None,
+        };
+
+        write_pose(&result, &path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("MODEL"), "{text}");
+        assert!(!text.contains("ENDMDL"), "{text}");
+        assert!(!text.contains("VINA RESULT"), "{text}");
+        assert!(text.contains("ROOT") && text.contains("ATOM"), "{text}");
+        // And it reads back as the same molecule.
+        let again = parse_pdbqt(&path).unwrap();
+        assert_eq!(again.atoms.len(), result.molecule.atoms.len());
+    }
     use super::*;
 
     fn fixture(name: &str) -> std::path::PathBuf {
