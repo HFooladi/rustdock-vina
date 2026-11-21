@@ -40,6 +40,24 @@ pub struct PoseScore {
     pub flex_flex: f64,
 }
 
+/// The ligand's internal (intramolecular) energy in this pose, as Vina's
+/// `REMARK INTRA` and the "Final Total Internal Energy" of `--score_only`
+/// report it.
+///
+/// Only pairs that can actually move relative to each other count, as in
+/// Vina: see [`Molecule::intramolecular_pairs`]. The energy is part of
+/// Vina's internal bookkeeping, not of the affinity, where it cancels
+/// against the unbound reference.
+pub fn ligand_internal_energy(
+    ligand: &Molecule,
+    forcefield: &dyn ForceField,
+) -> Result<f64, crate::Error> {
+    let pairs = ligand.intramolecular_pairs();
+    Ok(crate::optimization::monte_carlo::intramolecular_energy(
+        ligand, &pairs, forcefield,
+    )?)
+}
+
 /// Score a ligand pose against a receptor with any force field.
 ///
 /// This is the quantity Vina's `--score_only` reports as the intermolecular

@@ -26,6 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enrichment factors match Vina's within its seed-to-seed noise.
 
 ### Fixed
+- The ligand's reported internal energy counted pairs that cannot move.
+  Vina scores an intramolecular pair only when its two atoms can change
+  their distance (`mobility(i, j) == DISTANCE_VARIABLE` in `model.cpp`'s
+  `initialize_pairs`), which excludes every pair inside one rigid body and
+  any atom against the axis its body turns about. rustdock applied only the
+  "more than three bonds apart" half of that rule, so `REMARK INTRA`,
+  `REMARK UNBOUND` and `REMARK INTER + INTRA` were out by the constant
+  those fixed pairs contribute -- 0.078 kcal/mol on a PoseBusters ligand.
+  They now reproduce Vina's own values to within 0.0003
+  (`ligand_internal_energy_matches_vina`). The affinity never included this
+  constant, since it cancels against the unbound reference, so docking
+  results are unaffected beyond floating-point noise.
 - The `rmsd l.b.` and `rmsd u.b.` columns, in both the docking table and the
   `REMARK VINA RESULT` lines, held the same number: one plain RMSD over
   every atom, hydrogens included. They are now AutoDock Vina's two distinct
@@ -48,6 +60,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   logs its seed, so it can be reproduced.
 - Several `--ligand` files with a single `--out` is now an error. rustdock
   docks each ligand on its own, so they would have overwritten each other.
+- `Molecule` now carries the rigid bodies of its torsion tree (`body_of`,
+  `body_axis`) and `Molecule::variable` answers whether two atoms can move
+  relative to each other. The new public `ligand_internal_energy` gives a
+  pose's internal energy, the quantity Vina's `--score_only` prints.
 - **Breaking (library):** `DockingResult::rmsd` is replaced by `rmsd_lb` and
   `rmsd_ub`, the two measures Vina reports. The new public `rmsd_bounds`
   gives both for any two poses of a molecule, and `AtomType::element` gives

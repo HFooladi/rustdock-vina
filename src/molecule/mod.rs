@@ -89,6 +89,16 @@ pub struct Molecule {
     /// Meeko's `REMARK SMILES` lines, the `ROOT`/`BRANCH` torsion tree,
     /// `TORSDOF`, atom names and charges. Empty for molecules built in code.
     pub pdbqt_records: Vec<String>,
+
+    /// The rigid body each atom belongs to, as Vina's torsion tree defines
+    /// them: the `ROOT` is 0 and each `BRANCH` opens another, except that a
+    /// branch's first atom lies on its rotation axis and so moves with the
+    /// parent's body. Empty for a molecule built in code.
+    pub body_of: Vec<usize>,
+
+    /// Each body's rotation axis: the atom it hangs from, and its own first
+    /// atom. Nothing may move relative to the axis it turns about.
+    pub body_axis: Vec<(Option<usize>, Option<usize>)>,
 }
 
 impl Molecule {
@@ -101,6 +111,8 @@ impl Molecule {
             torsions: Vec::new(),
             is_rigid: true,
             pdbqt_records: Vec::new(),
+            body_of: Vec::new(),
+            body_axis: Vec::new(),
         }
     }
 
@@ -265,6 +277,33 @@ impl Molecule {
         self.nonbonded_pairs().1
     }
 
+    /// Whether `a` and `b` can move relative to each other, as Vina's
+    /// `DISTANCE_VARIABLE`: they sit in different rigid bodies, and neither
+    /// lies on the axis the other's body turns about.
+    ///
+    /// Vina scores an intramolecular pair only if this holds (`model.cpp`,
+    /// `initialize_pairs`). A pair inside one body holds a fixed distance,
+    /// so its energy is a constant: it cancels out of the affinity but
+    /// would otherwise inflate the reported internal energy.
+    ///
+    /// Without a torsion tree -- a molecule built in code rather than read
+    /// from a PDBQT -- no body is known, so every pair counts.
+    pub fn variable(&self, a: usize, b: usize) -> bool {
+        match (self.body_of.get(a), self.body_of.get(b)) {
+            (Some(&ba), Some(&bb)) => {
+                let on_axis = |atom: usize, body: usize| {
+                    self.body_axis
+                        .get(body)
+                        .is_some_and(|&(hangs_from, first)| {
+                            hangs_from == Some(atom) || first == Some(atom)
+                        })
+                };
+                ba != bb && !on_axis(a, bb) && !on_axis(b, ba)
+            }
+            _ => true,
+        }
+    }
+
     /// Heavy-atom pairs more than three bonds apart, split into scoring
     /// pairs and glue pairs.
     fn nonbonded_pairs(&self) -> (Vec<AtomPair>, Vec<AtomPair>) {
@@ -310,6 +349,10 @@ impl Molecule {
                     continue;
                 }
                 if bond_distance <= 3 {
+                    continue;
+                }
+                // Vina scores only pairs whose distance can change.
+                if !self.variable(start, other) {
                     continue;
                 }
                 let types = (self.atoms[start].atom_type, self.atoms[other].atom_type);
@@ -498,6 +541,47 @@ mod tests {
     use super::*;
 
     /// A molecule from (type, x) atoms on a line and explicit bonds, typed.
+    /// A chain of six carbons, 1-6 bonded in a line, so atoms 0 and 4 and
+    /// atoms 0 and 5 are both more than three bonds apart and would be
+    /// scored on bond distance alone.
+    fn chain_of_six() -> Molecule {
+        typed(
+            &[AtomType::Carbon; 6],
+            &[(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)],
+        )
+    }
+
+    /// A pair inside one rigid body keeps a fixed distance, so Vina does
+    /// not score it; a pair spanning two bodies it does.
+    #[test]
+    fn intra_pairs_skip_atoms_that_cannot_move_apart() {
+        // No torsion tree: nothing is known to be rigid, so both pairs count.
+        let mut molecule = chain_of_six();
+        let pairs = molecule.intramolecular_pairs();
+        assert!(
+            pairs.contains(&(0, 4)) && pairs.contains(&(0, 5)),
+            "{pairs:?}"
+        );
+
+        // One body holding every atom: no pair can change its distance.
+        molecule.body_of = vec![0; 6];
+        molecule.body_axis = vec![(None, None)];
+        assert!(molecule.intramolecular_pairs().is_empty());
+
+        // Split after atom 3: body 1 turns about the axis (2, 3), so atoms
+        // 4 and 5 move relative to atoms 0 and 1, while 2 and 3 are on the
+        // axis and cannot.
+        molecule.body_of = vec![0, 0, 0, 0, 1, 1];
+        molecule.body_axis = vec![(None, None), (Some(2), Some(3))];
+        let pairs = molecule.intramolecular_pairs();
+        assert!(pairs.contains(&(0, 4)), "0-4 spans both bodies: {pairs:?}");
+        assert!(pairs.contains(&(0, 5)), "0-5 spans both bodies: {pairs:?}");
+        assert!(
+            !molecule.variable(2, 4) && !molecule.variable(3, 5),
+            "an atom on the axis cannot move relative to the body it turns"
+        );
+    }
+
     fn typed(atoms: &[AtomType], bonds: &[(usize, usize)]) -> Molecule {
         let mut m = Molecule::new("test");
         for (i, &t) in atoms.iter().enumerate() {
