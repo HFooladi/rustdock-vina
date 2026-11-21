@@ -494,3 +494,55 @@ fn dropped_intra_pairs_never_move() {
         });
     assert!(moved, "no variable pair changed distance across the modes");
 }
+
+/// Minimizing a pose only improves it, and only nudges it.
+///
+/// `--local_only` takes the pose as given and runs BFGS from there, so on
+/// Vina's own docked pose -- already at a minimum of the same scoring
+/// function -- it must not raise the energy, and it must not wander off to
+/// a different pose the way a search would. The affinity is checked against
+/// Vina's for the crystal pose, which Vina itself minimizes to within a few
+/// hundredths.
+#[test]
+fn local_only_improves_a_pose_without_moving_it() {
+    let forcefield = VinaForceField::default();
+    let optimizer = MonteCarlo::new();
+    for complex in golden().iter().filter(|c| !c.flexible()) {
+        let receptor = complex.load("receptor.pdbqt");
+        let crystal = complex.load("ligand_xtal.pdbqt");
+        let target = optimizer
+            .target(
+                receptor,
+                &forcefield,
+                complex.vector("center"),
+                complex.vector("size"),
+            )
+            .expect("target");
+
+        let before = score_pose(&crystal, target.receptor(), &forcefield)
+            .expect("score")
+            .intermolecular;
+        let local = optimizer
+            .local_optimize(&target, &crystal, &forcefield)
+            .expect("minimize");
+        let after = local.pose.energy;
+        let moved = heavy_rmsd(&local.pose.molecule, &crystal);
+
+        println!(
+            "{}: {before:.3} -> {after:.3} kcal/mol, moved {moved:.2} A",
+            complex.code()
+        );
+        assert!(
+            after <= before + 1e-6,
+            "{}: minimizing raised the energy, {before:.3} -> {after:.3}",
+            complex.code()
+        );
+        // A local minimization stays local: Vina's own --local_only moves
+        // these poses a few tenths of an Angstrom at most.
+        assert!(
+            moved < 2.0,
+            "{}: minimizing moved the pose {moved:.2} A, which is a search, not a nudge",
+            complex.code()
+        );
+    }
+}

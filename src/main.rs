@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use rustdock_vina::forcefield::{
     ad4::AD4ForceField, vina::VinaForceField, vinardo::VinardoForceField, ForceField,
 };
-use rustdock_vina::io::{parse_flex_pdbqt, parse_pdbqt, write_docking_results};
+use rustdock_vina::io::{parse_flex_pdbqt, parse_pdbqt, write_docking_results, write_pose};
 use rustdock_vina::optimization::monte_carlo::{MonteCarlo, MonteCarloParams, Target};
 use rustdock_vina::optimization::DockingResult;
 use rustdock_vina::scoring::{ligand_internal_energy, score_pose_with_flex};
@@ -187,8 +187,13 @@ struct DockArgs {
     #[clap(long, visible_alias = "score_only")]
     score_only: bool,
 
+    /// Minimize the ligand from where it stands and write the one pose,
+    /// without searching
+    #[clap(long, visible_alias = "local_only")]
+    local_only: bool,
+
     /// Take the search box from the ligand's own extent, with Vina's 4 A of
-    /// padding (only with --score_only)
+    /// padding (only with --score_only or --local_only)
     #[clap(long)]
     autobox: bool,
 
@@ -233,6 +238,7 @@ fn main() -> Result<()> {
                 center,
                 size,
                 score_only,
+                local_only,
                 autobox,
                 exhaustiveness,
                 num_modes,
@@ -313,9 +319,25 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
-            // A search needs a box; `resolve` has already insisted on one.
+            // Minimizing or docking needs a box. `resolve` has insisted on
+            // one unless --autobox is to derive it from the ligand.
             let (center, box_size) = match (center, size) {
                 (Some(center), Some(size)) => (center, size),
+                _ if autobox => {
+                    let first = ligands.first().or_else(|| batch.first()).ok_or_else(|| {
+                        anyhow::anyhow!("--autobox needs a ligand to take the box from")
+                    })?;
+                    let ligand = parse_pdbqt(first).with_context(|| {
+                        format!("Failed to parse ligand file: {}", first.display())
+                    })?;
+                    let (center, size) = autobox_of(&ligand);
+                    info!("Grid center: ligand center (autobox)");
+                    info!(
+                        "Grid size  : X {} Y {} Z {} (autobox)",
+                        size.x, size.y, size.z
+                    );
+                    (center, size)
+                }
                 _ => return Err(anyhow::anyhow!("docking needs --center and --size")),
             };
 
@@ -368,6 +390,45 @@ fn main() -> Result<()> {
                     optimizer.target(receptor_molecule, forcefield.as_ref(), center, box_size)?
                 }
             };
+            // Minimizing takes the pose as it is, so there is no search and
+            // only ever one mode to write.
+            if local_only {
+                for ligand_path in ligands.iter().chain(&batch) {
+                    info!("Loading ligand: {}", ligand_path.display());
+                    let ligand = parse_pdbqt(ligand_path).with_context(|| {
+                        format!("Failed to parse ligand file: {}", ligand_path.display())
+                    })?;
+                    info!("Minimizing {}", ligand_path.display());
+                    let local = optimizer.local_optimize(&target, &ligand, forcefield.as_ref())?;
+                    let output_path = match (&out, &dir) {
+                        (Some(out_path), _) => out_path.clone(),
+                        (None, Some(dir_path)) => {
+                            let stem = ligand_path
+                                .file_stem()
+                                .unwrap_or_default()
+                                .to_string_lossy();
+                            dir_path.join(format!("{stem}_out.pdbqt"))
+                        }
+                        (None, None) => default_output(ligand_path),
+                    };
+                    if ligands.len() + batch.len() > 1 {
+                        println!("\n{}", ligand_path.display());
+                    }
+                    show_score(
+                        &local.pose.molecule,
+                        target.receptor(),
+                        local.flex.as_ref(),
+                        forcefield.as_ref(),
+                    )?;
+                    info!("Writing the minimized pose to {}", output_path.display());
+                    // As Vina's own --local_only: a plain PDBQT, which Vina
+                    // can read back (it rejects MODEL tags on one pose).
+                    write_pose(&local.pose, &output_path)
+                        .with_context(|| format!("Failed to write {}", output_path.display()))?;
+                }
+                return Ok(());
+            }
+
             let job = DockJob {
                 optimizer: &optimizer,
                 target: &target,
@@ -546,6 +607,7 @@ struct VinaConfig {
     cpu: Option<usize>,
     seed: Option<i64>,
     score_only: Option<bool>,
+    local_only: Option<bool>,
     autobox: Option<bool>,
 }
 
@@ -574,12 +636,7 @@ const UNSUPPORTED_WITH_DEFAULT: &[(&str, f64)] = &[
 ];
 
 /// Vina switches rustdock does not implement; `false` is accepted.
-const UNSUPPORTED_SWITCHES: &[&str] = &[
-    "local_only",
-    "randomize_only",
-    "no_refine",
-    "force_even_voxels",
-];
+const UNSUPPORTED_SWITCHES: &[&str] = &["randomize_only", "no_refine", "force_even_voxels"];
 
 /// Read a Vina configuration file as Vina 1.2.7 (Boost.Program_options)
 /// does: `key = value` lines, `#` to the end of a line is a comment, an
@@ -638,6 +695,7 @@ fn parse_config(config_str: &str) -> Result<VinaConfig> {
                 "cpu" => config.cpu = Some(num(key, value)?),
                 "seed" => config.seed = Some(num(key, value)?),
                 "score_only" => config.score_only = Some(switch(key, value)?),
+                "local_only" => config.local_only = Some(switch(key, value)?),
                 "autobox" => config.autobox = Some(switch(key, value)?),
                 "verbosity" => {
                     if value != "1" {
@@ -688,6 +746,8 @@ struct DockSettings {
     size: Option<Vector3<f64>>,
     /// Score the ligand as given, without searching.
     score_only: bool,
+    /// Minimize the ligand from where it stands, without searching.
+    local_only: bool,
     /// Take the box from the ligand (Vina's `--autobox`).
     autobox: bool,
     exhaustiveness: usize,
@@ -776,12 +836,19 @@ fn resolve(args: DockArgs, config: VinaConfig) -> Result<DockSettings> {
     }
 
     let score_only = args.score_only || config.score_only.unwrap_or(false);
+    let local_only = args.local_only || config.local_only.unwrap_or(false);
     let autobox = args.autobox || config.autobox.unwrap_or(false);
-    if autobox && !score_only {
+    if score_only && local_only {
+        return Err(anyhow::anyhow!(
+            "--score_only and --local_only ask for different things; pick one"
+        ));
+    }
+    if autobox && !(score_only || local_only) {
         // Vina computes an autobox only for --score_only and --local_only;
         // for a real search it would quietly use an undefined box.
         return Err(anyhow::anyhow!(
-            "--autobox only applies to --score_only; give --center and --size to dock"
+            "--autobox only applies to --score_only and --local_only; give \
+             --center and --size to dock"
         ));
     }
 
@@ -803,7 +870,8 @@ fn resolve(args: DockArgs, config: VinaConfig) -> Result<DockSettings> {
         Ok((center, size))
     }) {
         Ok((center, size)) => (Some(center), Some(size)),
-        Err(_) if score_only => (None, None),
+        // Minimizing needs a box, but --autobox will supply it.
+        Err(_) if score_only || autobox => (None, None),
         Err(e) => return Err(e),
     };
 
@@ -821,6 +889,7 @@ fn resolve(args: DockArgs, config: VinaConfig) -> Result<DockSettings> {
         center,
         size,
         score_only,
+        local_only,
         autobox,
         exhaustiveness: args.exhaustiveness.or(config.exhaustiveness).unwrap_or(8),
         num_modes: args.num_modes.or(config.num_modes).unwrap_or(9),
@@ -1186,6 +1255,7 @@ score_only = false
                 center: Some(Vector3::new(1.5, -2.0, 3.0)),
                 size: Some(Vector3::new(20.0, 22.0, 24.0)),
                 score_only: false,
+                local_only: false,
                 autobox: false,
                 exhaustiveness: 16,
                 num_modes: 20,
@@ -1256,7 +1326,7 @@ score_only = false
             ("seed = 1\nseed = 2", "set twice"),
             ("center_x", "expected `key = value`"),
             ("size_x = big", "not a valid number"),
-            ("local_only = true", "not supported"),
+            ("randomize_only = true", "not supported"),
             ("weight_gauss1 = -0.1", "only Vina's default"),
             ("maps = rec", "not supported"),
             ("config = other.txt", "unknown option"),
@@ -1344,7 +1414,61 @@ score_only = false
         let s = resolve(dock_args(&["--receptor", "r", "--ligand", "l"]), config).unwrap();
         assert!(s.score_only && s.autobox);
         // Vina still rejects what rustdock cannot do.
-        assert!(parse_config("local_only = true").is_err());
+        assert!(parse_config("randomize_only = true").is_err());
+    }
+
+    #[test]
+    fn local_only_needs_a_box_or_autobox() {
+        // Minimizing scores on grids, so it needs a box -- unlike scoring.
+        let args = dock_args(&["--receptor", "r", "--ligand", "l", "--local_only"]);
+        assert!(resolve(args, VinaConfig::default()).is_err());
+
+        let args = dock_args(&[
+            "--receptor",
+            "r",
+            "--ligand",
+            "l",
+            "--local_only",
+            "--autobox",
+        ]);
+        let s = resolve(args, VinaConfig::default()).unwrap();
+        assert!(s.local_only && s.autobox);
+        assert_eq!(s.center, None, "--autobox takes the box from the ligand");
+
+        let args = dock_args(&[
+            "--receptor",
+            "r",
+            "--ligand",
+            "l",
+            "--local_only",
+            "--center",
+            "0,0,0",
+            "--size",
+            "20,20,20",
+        ]);
+        let s = resolve(args, VinaConfig::default()).unwrap();
+        assert!(s.local_only && s.center.is_some());
+    }
+
+    #[test]
+    fn score_only_and_local_only_are_exclusive() {
+        let args = dock_args(&[
+            "--receptor",
+            "r",
+            "--ligand",
+            "l",
+            "--score_only",
+            "--local_only",
+        ]);
+        let err = resolve(args, VinaConfig::default()).unwrap_err();
+        assert!(err.to_string().contains("pick one"), "{err}");
+    }
+
+    #[test]
+    fn a_config_may_ask_for_local_only() {
+        let config = parse_config("local_only = 1\nautobox = true").unwrap();
+        let s = resolve(dock_args(&["--receptor", "r", "--ligand", "l"]), config).unwrap();
+        assert!(s.local_only && s.autobox);
     }
 
     /// Vina's `grid_dimensions_from_ligand`: the mean of every atom, and

@@ -1082,6 +1082,30 @@ impl<'a> Searcher<'a> {
         Ok(poses)
     }
 
+    /// Vina's `Vina::optimize`, the work of `--local_only`: BFGS from the
+    /// pose exactly as it was given, with no search and no randomization.
+    ///
+    /// The caps are Vina's `authentic_v`, so nothing is softened, and the
+    /// out-of-box penalty steepens over up to five rounds until every
+    /// movable heavy atom sits inside the box -- as Vina retries its own
+    /// quasi-Newton five times for the same reason.
+    pub(crate) fn local_search(
+        &self,
+        field: &dyn InterField,
+        steps: usize,
+    ) -> Result<Conf, OptimizationError> {
+        let mut s = self.scratch();
+        let mut conf = self.model.identity();
+        for p in 0..5 {
+            let slope = 100.0 * 10f64.powi(2 * p);
+            self.bfgs(field, &mut conf, slope, AUTHENTIC, steps, &mut s)?;
+            if self.within_box(&conf, &mut s) {
+                break;
+            }
+        }
+        Ok(conf)
+    }
+
     fn within_box(&self, conf: &Conf, s: &mut Scratch) -> bool {
         self.model.coords(conf, &mut s.coords);
         self.model

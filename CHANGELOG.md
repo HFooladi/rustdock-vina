@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `rustdock dock --local_only` minimizes the ligand from where it stands and
+  writes the one pose, as AutoDock Vina's `Vina::optimize`: BFGS on the
+  precomputed grids with nothing capped, `(25 + movable atoms) / 3` steps,
+  and a steepening out-of-box penalty over up to five rounds. The pose is
+  written as a plain PDBQT, which Vina can read back -- it rejects a
+  one-pose file carrying `MODEL` tags -- and the breakdown is printed in
+  Vina's layout. On the crystal pose of a PoseBusters complex rustdock
+  reaches -5.241 kcal/mol where Vina reaches -5.196, and Vina itself scores
+  rustdock's pose at -5.241, so the minimizer finds the deeper minimum of
+  the same function.
+- `write_pose` writes one pose that way, beside `write_docking_results` for
+  a docking run's modes. `MonteCarlo::local_optimize` is the library entry
+  point, returning a `LocalPose`.
 - `rustdock dock --score_only` scores the ligand where it stands and prints
   AutoDock Vina's ten-line breakdown, label for label, so a script that reads
   Vina's output keeps working. The search box may be left out, since nothing
@@ -18,12 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   line still matches. (`rustdock score` keeps its own layout.)
 - `--autobox` takes the search box from the ligand's extent with Vina's 4 A
   of padding, as `Vina::grid_dimensions_from_ligand`. As in Vina it applies
-  only to `--score_only`.
+  only to `--score_only` and `--local_only`.
 - A configuration file written for AutoDock Vina 1.2.7 now runs unchanged.
   `--config` reads every `dock` option in Vina's spelling (`receptor`,
   `ligand`, `batch`, `flex`, `out`, `dir`, `scoring`, `exhaustiveness`,
   `num_modes`, `min_rmsd`, `energy_range`, `spacing`, `cpu`, `seed`,
-  `score_only`, `autobox`), not
+  `score_only`, `local_only`, `autobox`), not
   just the search box, and the command line overrides it as Boost does. An
   unknown key, a key set twice, or an option rustdock does not implement is
   an error naming the line, rather than a silently different run.

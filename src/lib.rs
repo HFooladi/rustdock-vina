@@ -71,10 +71,12 @@ pub use forcefield::vina::{VinaForceField, VinaParams};
 pub use forcefield::vinardo::{VinardoForceField, VinardoParams};
 pub use forcefield::{ForceField, ForceFieldError};
 pub use grid::{Grid, GridError, GridSet};
-pub use io::{parse_flex_pdbqt, parse_pdbqt, write_docking_results, write_pdbqt, IoError};
+pub use io::{
+    parse_flex_pdbqt, parse_pdbqt, write_docking_results, write_pdbqt, write_pose, IoError,
+};
 pub use molecule::{Bond, FlexResidues, Molecule, MoleculeError, Torsion};
 pub use optimization::monte_carlo::{rmsd_bounds, MonteCarlo, MonteCarloParams};
-pub use optimization::{DockingResult, OptimizationError, Optimizer};
+pub use optimization::{DockingResult, LocalPose, OptimizationError, Optimizer};
 pub use scoring::vina_score::VinaScore;
 pub use scoring::{ligand_internal_energy, score_pose, score_pose_with_flex, PoseScore};
 

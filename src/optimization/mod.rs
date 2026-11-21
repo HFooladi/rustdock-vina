@@ -31,6 +31,18 @@ pub enum OptimizationError {
     Unknown(String),
 }
 
+/// A pose that was locally optimized rather than docked, as
+/// [`MonteCarlo::local_optimize`](crate::optimization::monte_carlo::MonteCarlo::local_optimize)
+/// and Vina's `--local_only` produce.
+pub struct LocalPose {
+    /// The optimized pose and its energies.
+    pub pose: DockingResult,
+
+    /// Where the flexible side chains ended up, ready to score the pose
+    /// against; `None` without `--flex`.
+    pub flex: Option<crate::molecule::FlexResidues>,
+}
+
 /// Represents a docking result
 #[derive(Debug, Clone)]
 pub struct DockingResult {

@@ -15,7 +15,7 @@ use crate::optimization::vina_search::{
     vina_global_steps, vina_local_steps, Caps, ExactField, GridField, InterField, SearchBox,
     SearchSettings, Searcher,
 };
-use crate::optimization::{DockingResult, OptimizationError, Optimizer};
+use crate::optimization::{DockingResult, LocalPose, OptimizationError, Optimizer};
 use crate::scoring::score_pose_with_flex;
 
 /// Parameters for the Monte Carlo search. Defaults are Vina's.
@@ -158,6 +158,79 @@ impl MonteCarlo {
         let mut target = self.target(receptor, forcefield, center, box_size)?;
         target.flex = Some(flex);
         Ok(target)
+    }
+
+    /// Locally optimize `ligand` where it stands, as Vina's `--local_only`:
+    /// no search, no randomization, just BFGS from the pose as given.
+    ///
+    /// `target` must have been made by [`target`](Self::target) with the
+    /// same force field. As in Vina's `Vina::optimize` the minimization runs
+    /// on the precomputed grids (on exact pairs when the target was built
+    /// with `use_grid` off), uncapped, for `(25 + movable atoms) / 3` steps,
+    /// retrying with a steeper out-of-box penalty until the pose sits inside
+    /// the box. The energies are then taken from exact pairwise sums, as
+    /// Vina rescores with its `non_cache`.
+    pub fn local_optimize(
+        &self,
+        target: &Target,
+        ligand: &Molecule,
+        forcefield: &dyn ForceField,
+    ) -> Result<LocalPose, OptimizationError> {
+        let (center, box_size) = (target.center, target.box_size);
+        let pruned = prune_receptor(&target.receptor, &center, &box_size, ligand);
+        let search_box = SearchBox::new(&center, &box_size, self.params.grid_spacing);
+        let flex = target.flex.as_ref();
+        let searcher = Searcher::new(ligand, flex, forcefield, search_box)?;
+        let grids = match &target.grids {
+            Some(grids) => {
+                let mut movable = Molecule::new("movable");
+                movable.atoms = searcher.movable_atoms().to_vec();
+                Some(grids.grid_set(&movable, forcefield)?)
+            }
+            None => None,
+        };
+        let exact = ExactField::new(&pruned, forcefield, search_box);
+        let grid_field = grids.as_ref().map(GridField);
+        let field: &dyn InterField = match &grid_field {
+            Some(g) => g,
+            None => &exact,
+        };
+
+        let steps = self
+            .params
+            .local_steps
+            .unwrap_or_else(|| vina_local_steps(searcher.model.n_movable()));
+        let conf = searcher.local_search(field, steps)?;
+
+        let coords = searcher.coords_of(&conf);
+        let molecule = searcher.model.to_molecule(ligand, &conf, &coords);
+        let moved = flex.map(|f| searcher.model.to_flex(f, &conf, &coords));
+        let mut inter = intermolecular_energy(&molecule, &pruned, forcefield)?;
+        let mut intra = searcher.intra_energy(&coords)?;
+        if let Some(moved) = &moved {
+            let score = score_pose_with_flex(&molecule, &pruned, Some(moved), forcefield)
+                .map_err(|e| OptimizationError::Unknown(e.to_string()))?;
+            inter += score.ligand_flex;
+            intra += score.flex_receptor + score.flex_flex;
+        }
+        Ok(LocalPose {
+            pose: DockingResult {
+                // One pose stands alone, so its own internal energy is the
+                // unbound reference and the energy is intermolecular, as
+                // Vina reports a `--local_only` run.
+                energy: inter,
+                molecule,
+                flex: moved.as_ref().map(|f| f.molecule.clone()),
+                energy_components: vec![
+                    ("Intermolecular".to_string(), inter),
+                    ("Intramolecular".to_string(), intra),
+                    ("Unbound".to_string(), intra),
+                ],
+                rmsd_lb: None,
+                rmsd_ub: None,
+            },
+            flex: moved,
+        })
     }
 
     /// Dock `ligand` into `target`, which must have been made by
