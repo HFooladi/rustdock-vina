@@ -20,6 +20,9 @@ output files can be read and rescored by Vina.
   Meeko and Vina read it back
 - Flexible receptor side chains (`--flex`, Vina's flex residue PDBQT),
   searched and scored as Vina does
+- Vina's command line and configuration files, so an existing Vina invocation
+  runs unchanged: every `key = value` option in Vina's spelling,
+  `--score_only`, `--local_only` and `--autobox`
 - Reproducible runs with `--seed`
 - Experimental AutoDock4 scoring (`--scoring ad4`; not validated)
 
